@@ -156,7 +156,59 @@ check('负向对照：v1 的 qrcode-generator 用法必须失效（证明能识�
   return 'v1 用法确为 undefined（正是"白方块"的成因）'
 })
 
-// ── 6. 负向对照：证明这个检查抓得住旧脚手架的写法 ────────────────────
+// ── 6. 手机页（host 侧 HTML）：语法 + 关键能力断言 ───────────────────
+// 这一节专门回答"某个功能到底做进去了没有"：直接解析产出的页面，断言能力真的在。
+let pageHtml = ''
+check('手机页可加载（lib/page.js → renderMobilePage）', () => {
+  // Node 24 支持 require(ESM)；page.js 是同步 ESM（无顶层 await）
+  const pageMod = require(join(here, '..', 'lib', 'page.js'))
+  if (typeof pageMod.renderMobilePage !== 'function') throw new Error('lib/page.js 没有 renderMobilePage 导出')
+  pageHtml = pageMod.renderMobilePage()
+  if (!pageHtml || pageHtml.length < 500) throw new Error('页面内容异常（过短）')
+  return `${pageHtml.length} 字节`
+})
+
+if (pageHtml) {
+  const scriptMatch = /<script>([\s\S]*)<\/script>/.exec(pageHtml)
+  check('手机页内嵌 JS 语法可解析', () => {
+    if (!scriptMatch) throw new Error('页面里找不到 <script>')
+    // 语法检查：解析失败会抛 SyntaxError（拼错一个括号整页就白屏）
+    new Function(scriptMatch[1])
+    return `${scriptMatch[1].length} 字节 JS`
+  })
+
+  const mustHave = [
+    ['浅色主题（白底黑字）', '--bg:#fff'],
+    ['工作区/会话抽屉', '工作区 / 会话'],
+    ['思考内容折叠块（半透明）', 'details.think'],
+    ['模型切换按钮', 'id="modelBtn"'],
+    ['模型来自 DSH 目录（models 接口）', "api('models'"],
+    ['工作区与 DSH 同源（workspaces 接口）', "api('workspaces'"],
+    ['归档过滤：抽屉列表', 'archived[s.sessionId]'],
+    ['归档过滤：首屏自动打开的会话', 'if (!archived[items[i].sessionId])'],
+    ['归档提示可见', '已隐藏 '],
+    ['模型切换写回会话', "api('selectModel'"],
+  ]
+  for (const [label, needle] of mustHave) {
+    check(`手机页能力：${label}`, () => {
+      if (!pageHtml.includes(needle)) throw new Error(`页面里找不到：${needle}`)
+      return 'ok'
+    })
+  }
+  check('负向对照：旧的四个快捷指令按钮必须已移除', () => {
+    if (pageHtml.includes('data-cmd')) throw new Error('仍存在快捷指令按钮（data-cmd）')
+    return '已移除'
+  })
+  check('负向对照：模型输出不得走 innerHTML 注入', () => {
+    // 只允许"清空容器"（box.innerHTML = ''）；其余赋值都算注入风险
+    const bad = [...pageHtml.matchAll(/\.innerHTML\s*=\s*([^\n;]{0,16})/g)]
+      .filter(m => m[1].trim() !== "''")
+    if (bad.length > 0) throw new Error(`存在非清空的 innerHTML 赋值（${bad.length} 处）：${bad.map(m => m[1].trim()).join(' | ')}`)
+    return '仅用 DOM API（innerHTML 只用于清空容器）'
+  })
+}
+
+// ── 7. 负向对照：证明这个检查抓得住旧脚手架的写法 ────────────────────
 check('负向对照：旧脚手架式组件必须被判为渲染失败（若这里 PASS 说明检查失效）', () => {
   // 旧脚手架的写法：函数组件返回"类实例"，其 render() 返回裸 DOM 节点。
   // React 18 会容忍"函数返回类实例"（仅告警并调用其 render()），

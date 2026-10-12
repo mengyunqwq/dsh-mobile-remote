@@ -393,6 +393,8 @@ function paintSidebar(box) {
     others.forEach(function (s) { var r = sessRow(s); if (r) g2.appendChild(r) })
     box.appendChild(g2)
   }
+  var hidden = sessions.filter(function (s) { return archived[s.sessionId] }).length
+  if (hidden) box.appendChild(el('div', 'sysline', '已隐藏 ' + hidden + ' 条已归档会话（与 DSH 归档一致）'))
   if (total === 0) box.appendChild(el('div', 'sysline', '没有可见会话（已归档的不显示）'))
 }
 
@@ -506,15 +508,23 @@ $('cancel').onclick = function () { if (cur) api('cancel', { sid: cur.sessionId 
 $('txt').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText() } })
 $('txt').addEventListener('input', autoGrow)
 
-// 初始：自动打开最近一个可见会话
+// 初始：自动打开最近一个**未被归档**的可见会话（归档集合与 DSH 同源）
 ;(async function boot() {
   try {
     var sres = await api('sessions', {})
     var items = (sres.value && sres.value.items) || []
-    if (items.length) openSession(items[0])
+    var wres = await api('workspaces', {})
+    var w = wres.value || {}
+    archived = {}
+    ;(w.archivedSessionIds || []).forEach(function (id) { archived[id] = true })
+    sessions = items
+    wsItems = w.items || []
+    var first = null
+    for (var i = 0; i < items.length; i++) { if (!archived[items[i].sessionId]) { first = items[i]; break } }
+    if (first) openSession(first)
     else {
       var r = addRow('boot', 'sysline')
-      r.appendChild(el('div', null, '还没有会话：点 ☰ 选择工作区/会话'))
+      r.appendChild(el('div', null, '没有可见会话（已归档的不显示）：点 ☰ 选择工作区'))
     }
   } catch (e) { /* 未登录时 api() 已跳转 */ }
 })()
