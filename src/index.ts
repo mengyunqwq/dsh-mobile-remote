@@ -8,14 +8,32 @@
  * 登录引导页用 ctx.connection.authenticatedUrl 铸 token 链接（GET / 兑换 cookie）。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import type WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { HostConnectionHandle, ConnectionTrustRequest } from '@deepseek-ai/dsh-client-connection'
 import type SessionControllerModule from '@deepseek-ai/dsh-api-session-controller'
 import type { SessionPromptRequest, SessionAddress, SessionCancelRequest } from '@deepseek-ai/dsh-api-session-controller/types'
+import z from '@deepseek-ai/schemastery'
 import { renderMobilePage } from './page.js'
+import { CloudflareTunnel } from './tunnel.js'
+
+export type TunnelConfig = {
+  /** 随 harness 启动 cloudflared 免账号快隧道（跨网扫码连接，无需手机装任何 App）。 */
+  tunnel?: boolean
+  /** cloudflared 可执行文件路径（留空=自动从 GitHub 下载到数据目录）。 */
+  cloudflaredPath?: string
+  /** 云隧道二进制/日志缓存目录（留空=系统临时目录下 dsh-mobile-remote）。 */
+  dataDir?: string
+}
+
+export const Config = z.object({
+  tunnel: z.boolean().default(true),
+  cloudflaredPath: z.string().default(''),
+  dataDir: z.string().default(''),
+})
 
 type AppContext = Context & {
   webServer: WebServer
@@ -26,17 +44,52 @@ type AppContext = Context & {
 export const name = "@dsh-external/dsh-mobile-remote"
 export const inject = ['webServer', 'connection', 'sessionController']
 
-export function apply(ctx: AppContext): void {
-  applyInner(ctx)
+export function apply(ctx: AppContext, config: TunnelConfig): void {
+  applyInner(ctx, config ?? {})
 }
 
-function applyInner(ctx: AppContext): void {
+function applyInner(ctx: AppContext, config: TunnelConfig): void {
   const PAGE_PATH = '/mobile'
   const STREAM_PATH = '/mobile/stream'
   const API_PATH = '/mobile/api'
 
-  const trust = (req: import('node:http').IncomingMessage): ConnectionTrustRequest =>
-    ({ headers: req.headers })
+  // ── 跨网隧道（cloudflared quick tunnel）：默认随 harness 启动 ──
+  // 数据目录放 DSH 数据区，避免 %TEMP% 被清理/抢占（实测踩坑）。
+  const dataDir = config.dataDir ||
+    join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'mobile-remote')
+  mkdirSync(dataDir, { recursive: true })
+  const tunnel = new CloudflareTunnel(dataDir)
+  const tunnelOn = config.tunnel !== false
+  ctx.effect(() => {
+    if (tunnelOn) {
+      void (async () => {
+        // 等一拍让 webserver 端口信息稳定，随后拉起隧道
+        const port = ctx.webServer.port ?? 3080
+        const res = await tunnel.ensure(`http://127.0.0.1:${port}`, config.cloudflaredPath || '')
+        ctx.logger?.info?.(`[${name}] 云隧道: ${res.state} ${res.url || ''}`)
+      })().catch((e) => ctx.logger?.info?.(`[${name}] 隧道启动失败: ${String(e)}`))
+    }
+    return () => tunnel.stop()
+  }, `${name}: cloudflared tunnel lifecycle`)
+
+  // ── 配对码：公网（云隧道）访客必须凭码完成登录（码只显示在电脑设置页）──
+  const pairCode = String(Math.floor(100000 + Math.random() * 900000))
+
+  // 隧道请求专用隔离 authority：cloudflared --http-host-header 改写 Host 到它；
+  // 正式信任名单在 profile patch 的 connection.trustedHosts 里静态授予。
+  // cookie authority 也固定为它 → 隧道换地址 cookie 不失效。
+  const TUNNEL_HOST = 'dsh-tunnel:3080'
+  const isTunnelReq = (req: import('node:http').IncomingMessage): boolean =>
+    (req.headers.host ?? '').toLowerCase() === TUNNEL_HOST
+
+  // 隧道请求的栅栏适配：去掉 Origin 头（fence 视为无 Origin 读放行；真正的跨站
+  // 恶意页面仍会被 Sec-Fetch-Site=cross-site 拒绝）。cookie 认证不变。
+  const trust = (req: import('node:http').IncomingMessage): ConnectionTrustRequest => {
+    if (!isTunnelReq(req)) return { headers: req.headers }
+    const headers: Record<string, string | string[] | undefined> = { ...req.headers }
+    delete headers.origin
+    return { headers }
+  }
 
   // 路由注册必须挂在 ctx.effect 上：fiber 卸载时自动摘除，热重载才不会
   // 留下残路由导致下次 apply 抛 "duplicate exact route"（实测踩坑）。
@@ -47,10 +100,30 @@ function applyInner(ctx: AppContext): void {
   const unauthorized = (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse): boolean => {
     const rejection = ctx.connection.requestRejection(trust(req))
     if (rejection === undefined) return false
-    // 401（未持有有效 cookie）→ 下发登录引导页（不直接 302，避免清除用户正在做的操作）
+    // 401（未持有有效 cookie）→ 下发登录引导页；公网隧道访客需要先输入配对码
     if (rejection === 401 && (req.url === PAGE_PATH || req.url?.startsWith(PAGE_PATH + '?'))) {
+      const viaTunnel = isTunnelReq(req)
+      const origin = new URL(`http://${req.headers.host ?? '127.0.0.1'}`).origin
+      const url = new URL(req.url, `http://${req.headers.host ?? 'localhost'}`)
+      const codeGiven = url.searchParams.get('pair') ?? ''
+      const codeOk = !!pairCode && codeGiven.trim() === pairCode
+      if (viaTunnel && !codeOk) {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<body style="font-family:system-ui;padding:2rem;max-width:30em;margin:auto">
+<h2>🔐 手机端登录（公网模式）</h2>
+<p style="color:#556">公网访问需要 6 位配对码。配对码显示在电脑端「插件设置 → 手机遥控」页。</p>
+<form method="get" action="/mobile" style="display:flex;gap:8px">
+  <input name="pair" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="配对码" style="flex:1;padding:12px;font-size:18px;border:1px solid #999;border-radius:10px;text-align:center;letter-spacing:6px">
+  <button style="padding:12px 20px;border:none;border-radius:10px;background:#2563eb;color:#fff;font-size:16px">连接</button>
+</form>
+${codeGiven ? '<p style="color:#b91c1c">配对码不正确。</p>' : ''}
+</body>`)
+        return true
+      }
+      // 公网拿到正确配对码 / 局域网访客：直接自动兑换登录
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-      const loginUrl = ctx.connection.authenticatedUrl(new URL(`http://${req.headers.host ?? '127.0.0.1'}`).origin)
+      const loginUrl = ctx.connection.authenticatedUrl(origin)
       res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <body style="font-family:system-ui;padding:2rem;max-width:30em;margin:auto">
 <h2>🔐 手机端登录</h2><p id="st" style="color:#889">正在自动登录…</p>
@@ -58,7 +131,7 @@ function applyInner(ctx: AppContext): void {
 <iframe src="${loginUrl}" style="width:0;height:0;border:0" title="login"></iframe>
 <script>
 var t = setInterval(function(){
-  fetch(location.pathname.replace(/\\/$/,'') + '/api/ping', {method:'POST'}).then(function(r){
+  fetch('/mobile/api/ping', {method:'POST'}).then(function(r){
     if (r.ok) { clearInterval(t); location.replace('/mobile?t=' + Date.now()) }
   }).catch(function(){})
 }, 1200);
@@ -66,7 +139,15 @@ setTimeout(function(){ var s=document.getElementById('st'); if(s) s.textContent=
 </script></body>`)
       return true
     }
-    res.writeHead(rejection, { 'cache-control': 'no-store', 'content-type': 'text/plain; charset=utf-8' })
+    res.writeHead(rejection, { 'cache-control': 'no-store', 'content-type': 'text/html; charset=utf-8' })
+    if (rejection === 403 && isTunnelReq(req)) {
+      res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<body style="font-family:system-ui;padding:2rem;max-width:30em;margin:auto">
+<h2>⏳ 云隧道尚未就绪</h2><p>监听配置已更新但还没重启 DeepSeek Harness。</p>
+<p style="color:#556">在电脑端重启 DSH 后，本地址即可用；配对码在「插件设置 → 手机遥控」页。</p>
+<p><button onclick="location.reload()">刷新重试</button></p></body>`)
+      return true
+    }
     res.end(rejection === 403 ? 'forbidden (host fence)' : 'unauthorized: open /mobile first')
     return true
   }
@@ -177,8 +258,44 @@ setTimeout(function(){ var s=document.getElementById('st'); if(s) s.textContent=
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`)
     const endpoint = url.pathname.replace(/^\/mobile\/api\/?/, '')
     if (req.method === 'GET') {
+      //GET /mobile/api/pair — 给桌面 GUI 设置页的扫码配对：返回本机局域网候选 + 手机面板地址
+      if (endpoint === 'pair') {
+        const os = await import('node:os')
+        const ips: string[] = []
+        for (const list of Object.values(os.networkInterfaces())) {
+          for (const net of list ?? []) {
+            if (net.family === 'IPv4' && !net.internal) ips.push(net.address)
+          }
+        }
+        const port = String(ctx.webServer.port ?? new URL(`http://${req.headers.host ?? '127.0.0.1'}`).port)
+        // 云隧道：若尚未就绪且开启中，尝试等待（首次会下载二进制，可能较慢）
+        let tunnelUrl = tunnel.publicUrl
+        if (!tunnelUrl && tunnelOn && tunnel.status === 'disabled') {
+          const r = await tunnel.ensure(`http://127.0.0.1:${port}`, config.cloudflaredPath || '')
+          tunnelUrl = r.url
+        }
+        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({
+          ok: true,
+          value: {
+            port,
+            ips,
+            urls: ips.map(ip => ({ ip, url: `http://${ip}:${port}/mobile` })),
+            tunnel: {
+              status: tunnel.status,
+              url: tunnelUrl,
+              lastError: tunnel.lastError || '',
+              logTail: tunnel.tail(),
+              // 公网配对码（设置页展示；二维码里的直连地址在多数相机场景预填，输入码兜底）
+              pairCode,
+            },
+            fallback: `http://127.0.0.1:${port}/mobile`,
+          },
+        }))
+        return
+      }
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search'] }))
+      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair'] }))
       return
     }
     if (req.method !== 'POST') { res.writeHead(405).end(); return }

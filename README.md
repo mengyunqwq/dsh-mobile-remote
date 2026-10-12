@@ -24,30 +24,42 @@
 
 | 模式 | 场景 | 需要做什么 |
 |---|---|---|
-| **A 局域网直连** | 手机与电脑同一 WiFi | 把 webserver 监听改 `0.0.0.0` + trustedHosts 加本机内网 IP（见下） |
-| **B Tailscale / ZeroTier** | 跨网络、最安全（推荐） | 手机电脑都装 Tailscale，用虚拟 IP 访问；trustedHosts 加该虚拟 IP |
-| **C 公网 HTTPS 隧道** | 无外网出口限制（自担风险） | cloudflared / frp + HTTPS；必须保证 trustedHosts 与认证开启 |
+| **A 局域网直连** | 手机与电脑同一 WiFi | 把 webserver 监听改 `0.0.0.0`（patch 见下） |
+| **B 云隧道 ☁️（跨网扫码，零手机端依赖）** | 出门/任何网络 | 插件自动托管 cloudflared 免账号快隧道；设置页 ☁️ 二维码直接扫 |
+| **C Tailscale / ZeroTier** | 需要固定地址 | 两端装 Tailscale，用虚拟 IP 访问 |
 
-> 服务端不暴露任何端口给陌生人的前提下，模式 A/B 的安全等价于桌面 GUI 本身。
+**模式 B（推荐"不在同一局域网也要扫码"）**：
+- 插件启动时自动托管 `cloudflared tunnel --url http://127.0.0.1:<port> --http-host-header dsh-tunnel:3080`，公网 HTTPS 地址随进程生灭：**Harness 关闭 = 隧道失效 = 重新扫码**（正好符合"开着常连，关了重扫"的生命周期）。
+- `dsh-tunnel:3080` 是插件专用的隔离 authority（profile patch 静态授予，见下）：cookie authority 固定，**隧道换地址 cookie 不失效**。
+- 公网访客必须凭 **6 位配对码** 才能完成登录（配对码显示在电脑设置页、二维码内嵌）；陌生访客只能看到输入码的页面，无法一键登录。
+- cloudflared 自动下载（**SHA256 与 GitHub 官方 Release 校验一致才采用**，防镜像劫持）；也可用 `cloudflaredPath` 配置指向自备二进制。
 
-### 让 DSH 可被局域网/虚拟网访问（模式 A/B 共同步骤）
+### 让 DSH 可被局域网/云隧道访问（A/B 共同的 patch 修改）
 
-在 `%DSH_HOME%\profiles\<profile>\cordis.patch.yml`（macOS/Linux 为 `~/.dsh/profiles/<profile>/`）追加两段：
+在 `%DSH_HOME%\profiles\<profile>\cordis.patch.yml`（macOS/Linux 为 `~/.dsh/profiles/<profile>/`）追加两段。
+（⚠ patch 的同 id 条目会**整条替换** base 的 config——webserver 的每个字段都要重述，缺 required 字段会导致整个 web 起不来，实测事故：只写 host 抹掉 port → `$.port missing required value`）
 
 ```yaml
 - id: webserver
   name: "@deepseek-ai/dsh-host-webserver"
+  inject: [ webStartup ]
   config:
-    host: "0.0.0.0"          # 监听所有网卡
+    host: !!js (ctx.webStartup.host === '127.0.0.1' || ctx.webStartup.host === 'localhost') ? '0.0.0.0' : ctx.webStartup.host
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
 
 - id: connection
   name: "@deepseek-ai/dsh-client-connection"
+  inject: [ webRuntime ]
   config:
-    trustedHosts:
-      - "192.168.1.23"       # 电脑的局域网/虚拟网 IP（不带端口=该 IP 任意端口）
+    trustedHosts: !!js [...(ctx.webRuntime.trustedHosts || []), 'dsh-tunnel:3080']
 ```
 
-改成你自己的 IP 后重启 DSH。手机访问 `http://<电脑IP>:3080/mobile`，首次会出现登录引导页，点一下就能自动完成配对（token 兑换签名 cookie，之后免登录）。
+改完**重启 DSH**：
+- 模式 A：手机访问 `http://<电脑IP>:3080/mobile`（同网免码自动配对）。
+- 模式 B：在电脑 GUI「插件设置 → 手机遥控」扫 ☁️ 二维码，跨网直连。
 
 ## 安装部署
 

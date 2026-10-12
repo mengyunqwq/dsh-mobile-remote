@@ -82,38 +82,46 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3080/mobile
 
 ## 第 4 步：开启局域网/虚拟网访问（问用户要接入模式，默认建议 A 或 B）
 
-编辑 `<PROFILE>/cordis.patch.yml`，追加两段（IP 先用 `ipconfig`/`ip addr` 查用户当前内网 IP，或询问用户）：
+编辑 `<PROFILE>/cordis.patch.yml`，追加两段（⚠ patch 同 id 条目**整条替换** base config，webserver 必须逐项重述，漏 required 字段会让 Web 起不来）：
 
 ```yaml
 - id: webserver
   name: "@deepseek-ai/dsh-host-webserver"
+  inject: [ webStartup ]
   config:
-    host: "0.0.0.0"
+    host: !!js (ctx.webStartup.host === '127.0.0.1' || ctx.webStartup.host === 'localhost') ? '0.0.0.0' : ctx.webStartup.host
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
 
 - id: connection
   name: "@deepseek-ai/dsh-client-connection"
+  inject: [ webRuntime ]
   config:
-    trustedHosts:
-      - "<电脑的内网or虚拟网IP>"    # 不带端口 = 该 IP 任意端口
+    trustedHosts: !!js [...(ctx.webRuntime.trustedHosts || []), 'dsh-tunnel:3080']
 ```
 
-> 注意：YAML 顶层是 patch 数组；每段是独立列表元素。若已有同 id 条目，并入其 `config`，不要重复 id。
-> 模式 B（Tailscale）时 trustedHosts 填 Tailscale 虚拟 IP（100.x.y.z）即可，附建议安装 Tailscale。
+> 注意：YAML 顶层是 patch 数组；`dsh-tunnel:3080` 是云隧道的隔离 authority（插件会用 cloudflared `--http-host-header` 把隧道流量 Host 统一改写到它），**必须保留这一段**，跨网扫码与稳定 cookie 都依赖它。
 
-重启 DSH 后验证（把 `<电脑IP>` 换成上面那个 IP）：
+重启 DSH 后验证：
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' http://<电脑IP>:3080/mobile   # 预期 200
+# 局域网（把 <IP> 换成电脑内网 IP）
+curl -s -o /dev/null -w '%{http_code}\n' http://<IP>:3080/mobile   # 200 或 401（引导页）都=通
+
+# 云隧道：在桌面 GUI「插件设置 → dsh-mobile-remote」页读 ☁️ 二维码/配对码；
+# 或（桌面已登录）从 Pair API 拿地址：fetch('/mobile/api/pair') → value.tunnel.url
 ```
 
 ## 第 5 步：交付给用户
 
 明确告诉用户：
 
-1. **手机地址**：`http://<电脑IP>:3080/mobile`
-2. 首次打开会出现「手机端登录」引导页 → 点链接即自动配对，随后免登录。
-3. 手机与电脑必须同局域网（或已组 Tailscale）。跨网建议模式 B。
-4. `http://<电脑IP>:3080/mobile` **等同于账号遥控权限**，不要分享给他人。
+1. **局域网**：手机浏览器打开 `http://<电脑IP>:3080/mobile`（首次免码自动配对）
+2. **跨网（云隧道 ☁️）**：在电脑 GUI「插件设置」打开 dsh-mobile-remote，手机扫 ☁️ 二维码即可；生成地址随 Harness 进程生灭——Harness 关闭后重新扫码即可
+3. 手机提示输入配对码（仅拍不到二维码时）：配对码显示在同一设置页
+4. `…/mobile` **等同于账号遥控权限**，云隧道地址/配对码不要片发给别人
 
 ## 故障排查（答复用户之前自己先跑一遍）
 

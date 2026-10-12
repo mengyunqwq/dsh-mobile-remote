@@ -1,7 +1,7 @@
 {
   "name": "@dsh-external/dsh-mobile-remote",
-  "version": "0.1.0",
-  "description": "手机端远程操控 DSH：移动端 UI 面板 + SSE 会话流，支持局域网/Tailscale/公网HTTPS三档接入",
+  "version": "0.2.0",
+  "description": "手机端远程操控 DSH：移动端 UI 面板 + SSE 会话流 + 扫码配对（局域网/云隧道跨网直连）",
   "private": true,
   "type": "module",
   "main": "./lib/index.js",
@@ -22,19 +22,20 @@
     "remote-control"
   ],
   "peerDependencies": {
+    "@deepseek-ai/dsh-api-session-controller": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-client-connection": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-host-webserver": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-client-connection": ">=0.0.1-rc <2",
-    "@deepseek-ai/dsh-api-session-controller": ">=0.0.1-rc <2",
-    "cordis": ">=4.0.0-rc <5",
     "@deepseek-ai/schemastery": "^3.18.2",
-    "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2"
+    "cordis": ">=4.0.0-rc <5"
   },
   "devDependencies": {
     "@types/node": "^24.13.3",
-    "typescript": "^5.9.0",
-    "tsdown": "^0.22.14"
+    "qrcode-generator": "^2.0.4",
+    "tsdown": "^0.22.14",
+    "typescript": "^5.9.0"
   },
   "scripts": {
     "build": "bash scripts/build.sh",
