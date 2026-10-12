@@ -1,0 +1,8 @@
+node_modules/
+lib/
+*.tsbuildinfo
+*.tgz
+cookie.txt
+debug.flag
+debug.idxlog
+page.html
