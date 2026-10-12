@@ -29,35 +29,24 @@ let layoutRef: { selectPanel?: (id: string) => void } | null = null
 
 // ── 工具 ─────────────────────────────────────────────────────────────
 
-/** text → PNG dataURL（ECC L，自动版本）；失败返回空串。 */
-function qrDataUrl(text: string): string {
+/** text → 二维码 SVG 字符串（ECC L，自动版本）；失败返回空串。
+ *  ⚠️ 必须用 qrcode-generator **v2** 的 API：getModuleCount() / isDark() / createSvgTag()。
+ *     v1 的 `qr.moduleCount` / `qr.isModule()` 在 v2 里是 undefined → 会画出**空白**二维码
+ *     （2026-10-12 实测踩坑：面板上只有一个白方块、无任何报错）。自检里已加 API 漂移负向对照。 */
+export function qrSvg(text: string, cellSize = 4, margin = 3): string {
   try {
     const qr = (qrcode as unknown as (n: number, ecl: string) => {
       addData: (d: string) => void
       make(): void
-      moduleCount: number
-      isModule: (r: number, c: number) => boolean
+      getModuleCount(): number
+      isDark(r: number, c: number): boolean
+      createSvgTag(opts: { cellSize?: number; margin?: number; scalable?: boolean }): string
     })(0, 'L')
     qr.addData(text)
     qr.make()
-    const n = qr.moduleCount
-    const cell = 4
-    const margin = 3
-    const size = (n + margin * 2) * cell
-    const canvas = document.createElement('canvas')
-    canvas.width = size
-    canvas.height = size
-    const g = canvas.getContext('2d')
-    if (!g) return ''
-    g.fillStyle = '#ffffff'
-    g.fillRect(0, 0, size, size)
-    g.fillStyle = '#0b0f17'
-    for (let r = 0; r < n; r++) {
-      for (let c = 0; c < n; c++) {
-        if (qr.isModule(r, c)) g.fillRect((c + margin) * cell, (r + margin) * cell, cell, cell)
-      }
-    }
-    return canvas.toDataURL('image/png')
+    const n = qr.getModuleCount()
+    if (!n || n < 21) return ''
+    return qr.createSvgTag({ cellSize, margin, scalable: true })
   } catch {
     return ''
   }
@@ -112,10 +101,24 @@ const S = {
 }
 
 function Qr({ text, size = 132 }: { text: string; size?: number }): unknown {
-  const [src, setSrc] = React.useState('')
-  React.useEffect(() => { setSrc(qrDataUrl(text)) }, [text])
-  if (!src) return h('div', { style: { width: size, height: size, background: 'rgba(127,143,170,.15)', borderRadius: 8, flex: 'none' } })
-  return h('img', { src, width: size, height: size, alt: '二维码', style: { borderRadius: 8, background: '#fff', padding: 6, flex: 'none' } })
+  // 三态：null=尚未生成（占位） / ''=生成失败 / 字符串=SVG
+  const [svg, setSvg] = React.useState(null as string | null)
+  React.useEffect(() => { setSvg(qrSvg(text)) }, [text])
+  const box = {
+    width: size, height: size, flex: 'none', background: '#fff',
+    borderRadius: 8, padding: 6, boxSizing: 'border-box',
+  } as const
+  if (svg === null) {
+    return h('div', { style: { ...box, background: 'rgba(127,143,170,.15)' }, title: text })
+  }
+  if (svg === '') {
+    return h('div', {
+      style: { ...box, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: '#8b96ab' },
+      title: text,
+    }, '二维码生成失败')
+  }
+  // 内联 SVG：不依赖 canvas / data: URL，任意尺寸都清晰
+  return h('div', { style: box, dangerouslySetInnerHTML: { __html: svg } })
 }
 
 function CopyButton({ text, label = '复制' }: { text: string; label?: string }): unknown {

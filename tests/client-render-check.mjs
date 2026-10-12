@@ -130,7 +130,33 @@ for (const r of registrations) {
   })
 }
 
-// ── 5. 负向对照：证明这个检查抓得住旧脚手架的写法 ────────────────────
+// ── 5. 二维码：真生成（这是"白方块"事故的守门检查） ──────────────────
+check('qrSvg 真生成二维码（含 <svg> 与 <path> 模块数据）', () => {
+  if (typeof mod?.qrSvg !== 'function') throw new Error('bundle 没有导出 qrSvg（无法自检二维码）')
+  const urls = [
+    'http://192.168.0.2:3080/mobile',
+    'https://resistant-clear-unlimited-organizational.trycloudflare.com?pair=123456',
+  ]
+  for (const u of urls) {
+    const svg = mod.qrSvg(u)
+    if (!svg || !svg.includes('<svg')) throw new Error(`未生成 SVG：${u}`)
+    if (!svg.includes('<path')) throw new Error(`SVG 缺少模块数据（空白二维码）：${u}`)
+  }
+  return `${urls.length} 个地址均生成成功`
+})
+
+check('负向对照：v1 的 qrcode-generator 用法必须失效（证明能识别 API 漂移）', () => {
+  const lib = require('qrcode-generator')
+  const qr = lib(0, 'L')
+  qr.addData('https://example.com')
+  qr.make()
+  if (typeof qr.getModuleCount !== 'function') throw new Error('连 v2 的 getModuleCount 都不存在 —— 环境异常')
+  if (qr.moduleCount !== undefined) throw new Error('该版本居然还有 v1 的 moduleCount —— 对照失效')
+  if (typeof qr.isModule === 'function') throw new Error('该版本居然还有 v1 的 isModule —— 对照失效')
+  return 'v1 用法确为 undefined（正是"白方块"的成因）'
+})
+
+// ── 6. 负向对照：证明这个检查抓得住旧脚手架的写法 ────────────────────
 check('负向对照：旧脚手架式组件必须被判为渲染失败（若这里 PASS 说明检查失效）', () => {
   // 旧脚手架的写法：函数组件返回"类实例"，其 render() 返回裸 DOM 节点。
   // React 18 会容忍"函数返回类实例"（仅告警并调用其 render()），
