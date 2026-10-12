@@ -691,16 +691,48 @@ async function selectModel(provider, model, reasoningEffort) {
 }
 
 // ── 权限 ────────────────────────────────────────────────────
-function permDisplayName(v) {
-  if (!v) return '权限'
-  var name = ''
-  ;((permCatalog && permCatalog.options) || []).forEach(function (o) { if (o.value === v) name = o.name || o.value })
-  return name || v
+// ── 权限（中文文案取自 DSH 本地化表：preset.readOnly / workspaceWrite / fullAccess / auto.*）──
+var PERM_ZH = {
+  'read-only': { name: '仅可查看', short: '只读', desc: '只能读取，不能修改文件' },
+  'workspace-write': { name: '工作区内修改', short: '工作区可写', desc: '只在工作目录内可写（默认）' },
+  'danger-full-access': { name: '完全权限', short: '完全权限', desc: '无沙箱限制，可直接执行敏感操作、改文件或跑外部命令' },
+  'auto': { name: 'Auto review（实验）', short: '自动审查', desc: '无沙箱运行；每次原生工具调用和 PTC 内层调用前由同一模型进行实验性审查' }
+}
+function catalogOption(v) {
+  var hit = null
+  ;((permCatalog && permCatalog.options) || []).forEach(function (o) { if (o.value === v) hit = o })
+  return hit
+}
+/** 展示名：优先 DSH 中文；若部署方自定义了 label（与机器值不同）则用它；最后回退机器值。 */
+function permName(v) {
+  var o = catalogOption(v)
+  if (o && o.name && o.name !== o.value) return o.name
+  if (PERM_ZH[v]) return PERM_ZH[v].name
+  return (o && o.name) || v || '权限'
+}
+function permShort(v) {
+  if (PERM_ZH[v]) return PERM_ZH[v].short
+  return permName(v)
+}
+function permDesc(v) {
+  var o = catalogOption(v)
+  if (o && o.description) return o.description
+  return (PERM_ZH[v] && PERM_ZH[v].desc) || ''
+}
+/** 高危权限的确认文案与 DSH 一致（完全权限 / Auto review 都有风险门）。 */
+function permConfirm(v) {
+  if (v === 'danger-full-access') {
+    return '确认启用完全权限？\\n\\n启用完全权限后，新会话将减少确认步骤，并且可以直接执行更多操作，\\n包括敏感操作、文件修改或外部命令。仅建议在你信任当前任务时使用。'
+  }
+  if (v === 'auto') {
+    return '确认启用 Auto review（实验）？\\n\\nAuto review 不使用沙箱。每次原生工具调用和 PTC 内层调用前，都会由与当前 agent 相同的模型进行审查；审查拒绝的调用由你批准或拒绝。此功能仍属实验性，可能误放行或误拒绝，并会消耗额外 token。'
+  }
+  return ''
 }
 function paintPermBtn() {
   var lb = $('permBtn').querySelector('.lb')
-  if (lb) lb.textContent = permDisplayName(curPerm)
-  $('permBtn').title = curPerm ? ('当前权限：' + curPerm + '（切换后桌面 DSH 同步）') : '权限'
+  if (lb) lb.textContent = permShort(curPerm)
+  $('permBtn').title = curPerm ? ('当前权限：' + permName(curPerm) + '（' + curPerm + '）切换后桌面 DSH 同步') : '权限'
 }
 async function loadPermissions() {
   var box = $('permList')
@@ -716,13 +748,13 @@ async function loadPermissions() {
 function paintPermList(box) {
   box.innerHTML = ''
   if (!permCatalog) { box.textContent = '无权限目录'; return }
-  var opts = permCatalog.options || []
-  opts.forEach(function (o) {
+  ;(permCatalog.options || []).forEach(function (o) {
     var isCur = curPerm === o.value
     var row = el('div', 'mrow' + (isCur ? ' cur' : ''))
     var mn = el('div', 'mn')
-    mn.appendChild(el('b', null, o.name || o.value))
-    mn.appendChild(el('span', null, o.value + (o.description ? ' · ' + o.description : '')))
+    mn.appendChild(el('b', null, permName(o.value)))
+    var d = permDesc(o.value)
+    mn.appendChild(el('span', null, o.value + (d ? ' · ' + d : '')))
     row.appendChild(mn)
     row.appendChild(el('span', 'go', isCur ? '当前' : '切换'))
     row.onclick = function () { selectPerm(o.value) }
@@ -732,6 +764,8 @@ function paintPermList(box) {
 }
 async function selectPerm(preset) {
   if (!cur) { alert('先选择一个会话'); return }
+  var warn = permConfirm(preset)
+  if (warn && !window.confirm(warn)) return
   try {
     await api('selectPermission', { sid: cur.sessionId, preset: preset })
     curPerm = preset

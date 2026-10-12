@@ -208,6 +208,13 @@ if (pageHtml) {
     ['权限目录接口', "api('permissions'"],
     ['权限切换接口', "api('selectPermission'"],
     ['权限按钮', 'id="permBtn"'],
+    ['权限中文：仅可查看', "'仅可查看'"],
+    ['权限中文：工作区内修改', "'工作区内修改'"],
+    ['权限中文：完全权限', "'完全权限'"],
+    ['权限中文：Auto review（实验）', "'Auto review（实验）'"],
+    ['高危权限确认门（完全权限）', '确认启用完全权限'],
+    ['高危权限确认门（Auto review）', '确认启用 Auto review'],
+    ['权限 chip 用短中文名', "'工作区可写'"],
   ]
   for (const [label, needle] of mustHave) {
     check(`手机页能力：${label}`, () => {
