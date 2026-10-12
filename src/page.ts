@@ -3,21 +3,25 @@
  *
  * 与桌面 DSH 对齐：
  *  - 白底黑字浅色主题，圆角卡片、轻阴影
- *  - 会话列表只列「工作区内的会话」（DSH 侧栏同源）；子代理会话与已归档会话都不显示，
- *    其余（无工作区归属的杂项）收进默认折叠的「其他会话」
- *  - 思考内容 = 半透明可展开块（<details>，同 DSH 的 thinking）
- *  - 输入区做成 DSH 的样子：模型按钮在输入框内左侧，发送是圆形图标按钮（框内右下）
- *  - 任务执行时显示状态：执行中 / 排队 N 条（可展开看排队内容）
+ *  - 会话列表只列「工作区内的会话」；子代理会话与已归档会话不显示，其余收进折叠区
+ *  - **思考内容默认折叠**（半透明可展开块）
+ *  - **一个 turn 的思考/工具调用在执行结束后折进「已完成 · 完成时间」**（同 DSH 的 turn 折叠）
+ *  - 输入区同 DSH：权限 chip + 模型 chip 在框内左侧，**上下文圆环**（百分比）在右侧，
+ *    发送是圆形图标按钮；运行中额外出现停止按钮
+ *  - 权限可切换（写回会话，桌面 GUI 同步）；模型可切换并立即回显
+ *  - 任务执行时显示「正在执行 · 排队 N 条」（可展开看排队内容）
  * 数据面：POST /mobile/api/<endpoint> + GET /mobile/stream?sid=…（SSE）
  *
  * 事件形状（取自真实会话日志）：
- *  user/message      { content:[{type:'text',text}], role:'user' }
- *  assistant/message { message:{ content:[{type:'reasoning',text}|{type:'text',text}|{type:'tool-call',id,name,arguments}] } }
- *  tool/call         { callId, name, arguments }
- *  tool/result       { toolCallId, message:{ content:[{type:'text',text}], isError } }
- * 会话状态（/status）：{ running, blank, title, modelSelection, queue:{nextTurn[],nextStep[]} }
+ *  user/message      { content:[{type:'text',text}] }
+ *  assistant/message { turn, step, message:{ content:[{type:'reasoning',text}|{type:'text',text}|{type:'tool-call',id,name,arguments}] } }
+ *  tool/call         { turn, step, callId, name, arguments }
+ *  tool/result       { turn, step, toolCallId, message:{ content:[{type:'text',text}], isError } }
+ *  turn/start | turn/end | step/start | step/end
+ * /status：{ running, title, modelSelection, permissions, tokenUsage, contextPressure, contextBreakdown, queue:{nextTurn[],nextStep[]} }
+ * /permissions：{ catalog:{options[],defaultPreset}, current }
  *
- * 安全：模型输出一律 textContent / createElement，绝不 innerHTML 注入（只用于清空容器）。
+ * 安全：模型输出一律 textContent / createElement（innerHTML 只用于清空容器）。
  */
 
 const PAGE = `<!doctype html>
@@ -30,64 +34,74 @@ const PAGE = `<!doctype html>
 :root{
   --bg:#f7f8fa;--card:#fff;--fg:#111827;--muted:#8b93a1;--line:#e8eaee;
   --soft:#f2f4f7;--user:#e8efff;--accent:#2f6fed;--ok:#12b76a;--warn:#f79009;
+  --sys:#7c9cf5;--tools:#f0b45f;--msgs:#7dd3a8;
   --radius:16px;--shadow:0 1px 2px rgba(16,24,40,.04),0 4px 14px rgba(16,24,40,.05);
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%}
 body{background:var(--bg);color:var(--fg);font:15px/1.62 -apple-system,BlinkMacSystemFont,system-ui,"PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overscroll-behavior:none}
 header{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,.92);backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10;padding-top:calc(10px + env(safe-area-inset-top))}
-header .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650;font-size:15.5px;letter-spacing:.1px}
+header .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650;font-size:15.5px}
 header .sub{display:block;font-size:11.5px;color:var(--muted);font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 button.ghost{background:transparent;border:none;color:var(--fg);width:34px;height:34px;border-radius:10px;font-size:17px;flex:none;cursor:pointer;display:flex;align-items:center;justify-content:center}
 button.ghost:active{background:var(--soft)}
-#log{flex:1;overflow-y:auto;padding:14px 12px 6px;-webkit-overflow-scrolling:touch;scroll-behavior:smooth}
+#log{flex:1;overflow-y:auto;padding:14px 12px 6px;-webkit-overflow-scrolling:touch}
 .row{margin:9px 0;max-width:93%}
 .row.user{margin-left:auto}
+.row.bot{max-width:100%}
 .bub{border-radius:var(--radius);padding:10px 13px;white-space:pre-wrap;word-break:break-word}
 .user .bub{background:var(--user);border-bottom-right-radius:5px}
 .bot .bub{background:var(--card);border:1px solid var(--line);border-bottom-left-radius:5px;box-shadow:var(--shadow)}
+/* turn 过程折叠（已完成） */
+details.proc{background:var(--soft);border:1px solid var(--line);border-radius:12px;padding:7px 11px;margin:8px 0;font-size:12.5px}
+details.proc>summary{cursor:pointer;list-style:none;color:#6b7280;font-weight:600;display:flex;align-items:center;gap:6px}
+details.proc>summary::-webkit-details-marker{display:none}
+details.proc>summary::before{content:"▸";font-size:10px;opacity:.7}
+details.proc[open]>summary::before{content:"▾"}
+details.proc .body{padding-top:6px}
 details.think{background:rgba(107,114,128,.07);border:1px solid rgba(107,114,128,.16);border-left:3px solid rgba(107,114,128,.38);border-radius:12px;padding:7px 11px;margin:7px 0;font-size:13px;color:#525c6b}
-details.think>summary{cursor:pointer;list-style:none;font-weight:600;color:#6b7280;font-size:12px;user-select:none;display:flex;align-items:center;gap:5px}
+details.think>summary{cursor:pointer;list-style:none;font-weight:600;color:#6b7280;font-size:12px;display:flex;align-items:center;gap:5px}
 details.think>summary::-webkit-details-marker{display:none}
 details.think>summary::before{content:"▸";font-size:10px;opacity:.75}
 details.think[open]>summary::before{content:"▾"}
 details.think pre{margin:7px 0 2px;white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;opacity:.92}
-details.tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;margin:7px 0;font-size:12.5px;box-shadow:var(--shadow)}
+details.tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;margin:7px 0;font-size:12.5px}
 details.tool>summary{cursor:pointer;list-style:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#3f4756;display:flex;gap:6px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 details.tool>summary::-webkit-details-marker{display:none}
 details.tool>summary::before{content:"🔧";font-size:11px}
 details.tool pre{margin:7px 0 2px;white-space:pre-wrap;word-break:break-word;font:11.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#525c6b;max-height:260px;overflow:auto}
 details.tool .res{margin-top:7px;border-top:1px dashed var(--line);padding-top:7px}
 .sysline{color:#a3aab6;font-size:12px;text-align:center;margin:9px 0}
-/* ── 输入区（DSH 样式：模型按钮在框内，圆形图标发送） ── */
+/* 输入区 */
 #dock{padding:8px 12px calc(10px + env(safe-area-inset-bottom));background:linear-gradient(180deg,rgba(247,248,250,0),var(--bg) 38%)}
 #queue{display:none;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;margin-bottom:8px;font-size:12.5px;box-shadow:var(--shadow)}
 #queue .dot{width:7px;height:7px;border-radius:50%;background:var(--warn);flex:none}
 #queue.run .dot{background:var(--ok);animation:pulse 1.4s infinite}
 @keyframes pulse{50%{opacity:.35}}
 #queue .txt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#4b5563}
-#queue button{border:none;background:transparent;color:var(--accent);font-size:12px;cursor:pointer;padding:2px 4px}
+#queue button{border:none;background:transparent;color:var(--accent);font-size:12px;cursor:pointer}
 #queueList{display:none;margin:-2px 0 8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;font-size:12.5px;color:#4b5563}
 #queueList .qi{padding:4px 0;border-bottom:1px dashed var(--line);white-space:pre-wrap;word-break:break-word}
 #queueList .qi:last-child{border-bottom:none}
 #box{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:6px 6px 6px 8px}
 #txt{width:100%;resize:none;border:none;outline:none;background:transparent;color:var(--fg);font:inherit;padding:8px 6px 4px;max-height:132px}
-#boxBottom{display:flex;align-items:center;gap:8px;padding:2px 2px 2px 4px}
-#modelBtn{display:flex;align-items:center;gap:5px;background:var(--soft);border:none;color:#4b5563;border-radius:999px;padding:5px 10px;font-size:12px;max-width:58%;cursor:pointer}
-#modelBtn .mn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#modelBtn .caret{opacity:.55;font-size:10px}
+#boxBottom{display:flex;align-items:center;gap:6px;padding:2px}
+.chip{display:flex;align-items:center;gap:4px;background:var(--soft);border:none;color:#4b5563;border-radius:999px;padding:5px 9px;font-size:12px;cursor:pointer;max-width:34%}
+.chip .lb{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip .caret{opacity:.55;font-size:10px}
+.chip.perm{color:#7a5b13;background:#fdf3e2}
 #boxBottom .spacer{flex:1}
+.ring{display:flex;align-items:center;gap:4px;background:transparent;border:none;padding:2px 4px;cursor:pointer;color:var(--muted);font-size:11px}
 button.round{width:34px;height:34px;border-radius:50%;border:none;display:flex;align-items:center;justify-content:center;flex:none;cursor:pointer}
 #send{background:var(--accent);color:#fff}
-#send:disabled{background:#c9d3e4;color:#fff}
 #stop{background:#fee4e2;color:#d92d20;display:none}
-/* ── 抽屉 / 模型面板 ── */
+/* 面板 */
 .sheet{position:fixed;inset:0;background:rgba(16,24,40,.34);z-index:30;display:none}
 .sheet.open{display:block}
 .sheet>.panel{position:absolute;background:var(--card);box-shadow:0 10px 40px rgba(16,24,40,.2)}
 #drawer>.panel{left:0;top:0;bottom:0;width:87%;max-width:370px;padding:calc(12px + env(safe-area-inset-top)) 10px 16px;overflow-y:auto;border-radius:0 18px 18px 0}
-#modelSheet>.panel{left:0;right:0;bottom:0;max-height:78%;border-radius:20px 20px 0 0;padding:14px 12px calc(14px + env(safe-area-inset-bottom));overflow-y:auto}
-.sheet h3{margin:4px 8px 10px;font-size:13px;color:var(--muted);font-weight:650;letter-spacing:.2px}
+#sheetModel>.panel,#sheetCtx>.panel,#sheetPerm>.panel{left:0;right:0;bottom:0;max-height:78%;border-radius:20px 20px 0 0;padding:14px 12px calc(14px + env(safe-area-inset-bottom));overflow-y:auto}
+.sheet h3{margin:4px 8px 10px;font-size:13px;color:var(--muted);font-weight:650}
 .ws{margin:12px 0 4px}
 .ws>.name{font-size:12px;color:var(--muted);padding:2px 8px 6px;display:flex;gap:6px;align-items:baseline}
 .ws>.name b{color:var(--fg);font-size:13.5px;font-weight:650}
@@ -100,8 +114,8 @@ button.round{width:34px;height:34px;border-radius:50%;border:none;display:flex;a
 details.others{margin:14px 6px 0}
 details.others>summary{cursor:pointer;list-style:none;font-size:12px;color:var(--muted);padding:6px 2px}
 details.others>summary::-webkit-details-marker{display:none}
-details.others>summary::before{content:"▸ ";}
-details.others[open]>summary::before{content:"▾ ";}
+details.others>summary::before{content:"▸ "}
+details.others[open]>summary::before{content:"▾ "}
 .mrow{display:flex;gap:10px;align-items:center;padding:11px;border-radius:12px;cursor:pointer}
 .mrow.cur{background:#eef3ff}
 .mrow .mn{flex:1;min-width:0}
@@ -112,6 +126,15 @@ details.others[open]>summary::before{content:"▾ ";}
 .efforts{display:flex;gap:7px;flex-wrap:wrap;padding:2px 11px 10px}
 .efforts button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:5px 11px;font-size:12px;cursor:pointer;color:#4b5563}
 .efforts button.cur{background:#eef3ff;border-color:#c7d9ff;color:#1d4ed8}
+/* 上下文面板 */
+.ctxHead{font-size:15px;font-weight:650;margin:2px 8px 10px}
+.ctxBar{display:flex;height:10px;border-radius:6px;overflow:hidden;background:var(--soft);margin:0 8px 12px}
+.ctxBar i{display:block;height:100%}
+.ctxRow{display:flex;align-items:center;gap:8px;padding:7px 8px;font-size:13px}
+.ctxRow .sw{width:9px;height:9px;border-radius:3px;flex:none}
+.ctxRow .k{flex:1;min-width:0;color:#4b5563}
+.ctxRow .v{font-variant-numeric:tabular-nums;color:#374151}
+.ctxSep{height:1px;background:var(--line);margin:8px}
 </style></head>
 <body>
 <header>
@@ -132,8 +155,10 @@ details.others[open]>summary::before{content:"▾ ";}
   <div id="box">
     <textarea id="txt" rows="1" placeholder="给 agent 发消息…"></textarea>
     <div id="boxBottom">
-      <button id="modelBtn" type="button" title="切换模型"><span class="mn">模型</span><span class="caret">▾</span></button>
+      <button class="chip perm" id="permBtn" type="button" title="权限（与桌面同步）"><span class="lb">权限</span><span class="caret">▾</span></button>
+      <button class="chip" id="modelBtn" type="button" title="切换模型"><span class="lb">模型</span><span class="caret">▾</span></button>
       <span class="spacer"></span>
+      <button class="ring" id="ctxBtn" type="button" title="上下文占用"></button>
       <button class="round" id="stop" type="button" aria-label="停止">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
       </button>
@@ -149,9 +174,19 @@ details.others[open]>summary::before{content:"▾ ";}
   <div id="sessList">加载中…</div>
 </div></div>
 
-<div class="sheet" id="modelSheet"><div class="panel">
+<div class="sheet" id="sheetModel"><div class="panel">
   <h3>选择模型（与 DSH 同步）</h3>
   <div id="modelList">加载中…</div>
+</div></div>
+
+<div class="sheet" id="sheetCtx"><div class="panel">
+  <h3>上下文与 token 用量</h3>
+  <div id="ctxBody">暂无数据</div>
+</div></div>
+
+<div class="sheet" id="sheetPerm"><div class="panel">
+  <h3>权限（与桌面 DSH 同步）</h3>
+  <div id="permList">加载中…</div>
 </div></div>
 
 <script>
@@ -162,12 +197,17 @@ var cur = null
 var es = null
 var rows = new Map()
 var cards = new Map()
+var turns = new Map()
 var live = { text: '', think: '', tRow: null, kRow: null }
 var sessions = []
 var wsItems = []
 var archived = {}
 var modelCatalog = null
 var curModel = null
+var modelOverride = null
+var permCatalog = null
+var curPerm = ''
+var usage = { tokenUsage: null, contextPressure: null, contextBreakdown: null }
 var running = false
 var queueItems = []
 var counter = 0
@@ -180,16 +220,19 @@ function el(tag, cls, text) {
   return d
 }
 function scrollDown() { requestAnimationFrame(function () { logEl.scrollTop = logEl.scrollHeight }) }
-function removeRow(key) { var r = rows.get(key); if (r) { r.remove(); rows.delete(key) } }
-function addRow(key, cls) {
-  removeRow(key)
-  var r = el('div', 'row ' + cls)
-  logEl.appendChild(r)
-  rows.set(key, r)
-  return r
-}
-function autoGrow() { var t = $('txt'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 132) + 'px' }
 function oneLine(s, n) { s = String(s || '').replace(/\\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s }
+function autoGrow() { var t = $('txt'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 132) + 'px' }
+function hhmmss(ms) {
+  try { return new Date(ms || Date.now()).toLocaleTimeString('zh-CN', { hour12: false }) } catch (e) { return '' }
+}
+function fmtTokens(v) {
+  var n = Number(v || 0)
+  if (!isFinite(n)) return '0'
+  if (n < 1000) return String(n)
+  var scaled = function (x) { return x >= 100 ? String(Math.round(x)) : String(Math.round(x * 10) / 10) }
+  if (n < 1e6) return scaled(n / 1e3) + 'K'
+  return scaled(n / 1e6) + 'M'
+}
 
 async function api(endpoint, payload) {
   var res = await fetch('/mobile/api/' + endpoint, {
@@ -200,7 +243,7 @@ async function api(endpoint, payload) {
   return res.json()
 }
 
-// ── 渲染（DOM，不用 innerHTML 注入） ────────────────────────
+// ── 渲染 ────────────────────────────────────────────────────
 function textOfContent(content) {
   if (!Array.isArray(content)) return ''
   var out = []
@@ -212,9 +255,9 @@ function textOfContent(content) {
   }
   return out.join('\\n')
 }
-function thinkBlock(text, open) {
+/** 思考块：默认折叠（用户明确要求不要默认展开）。 */
+function thinkBlock(text) {
   var d = el('details', 'think')
-  if (open) d.open = true
   d.appendChild(el('summary', null, '思考过程 · ' + (text || '').length + ' 字'))
   d.appendChild(el('pre', null, text || ''))
   return d
@@ -231,55 +274,102 @@ function toolCard(name, args, callId) {
   return d
 }
 
+/** 一个 turn 的过程容器：执行中展开，结束后折成「已完成 · 时间」。
+ *  分组键优先用事件里的 turn 号；没有 turn 号时用"当前活跃 turn"序号兜底，
+ *  避免多个 turn 的内容落进同一个已收起的框。 */
+var activeTurn = '1'
+var turnCounter = 1
+function keyOfTurn(turnNo) {
+  return (turnNo == null) ? activeTurn : String(turnNo)
+}
+function turnBox(turnNo) {
+  var key = keyOfTurn(turnNo)
+  var t = turns.get(key)
+  if (t && t.done) {                       // 已收起的框不再续写：开新框
+    turnCounter += 1
+    key = 'r' + turnCounter
+    t = null
+  }
+  if (t) return t
+  var box = el('details', 'proc')
+  box.open = true
+  var sum = el('summary', null, '执行中…')
+  var body = el('div', 'body')
+  box.appendChild(sum); box.appendChild(body)
+  logEl.appendChild(box)
+  t = { box: box, body: body, sum: sum, done: false }
+  turns.set(key, t)
+  return t
+}
+function appendToTurn(turnNo, node) { turnBox(turnNo).body.appendChild(node) }
+function finishTurn(turnNo, timeMs) {
+  var t = turns.get(keyOfTurn(turnNo))
+  if (!t || t.done) return
+  t.done = true
+  t.sum.textContent = '已完成 · ' + hhmmss(timeMs)
+  t.box.open = false
+  scrollDown()
+}
+
 function renderEvent(ev, key) {
   var t = ev.type || '', d = ev.data || {}
   if (t === 'user/message') {
-    var r = addRow(key, 'user')
+    var r = el('div', 'row user')
     r.appendChild(el('div', 'bub', textOfContent(d.content)))
+    logEl.appendChild(r); rows.set(key, r)
     return
   }
+  if (t === 'turn/start') {
+    if (d.turn == null) { turnCounter += 1; activeTurn = String(turnCounter) } else { activeTurn = String(d.turn) }
+    turnBox(d.turn)
+    return
+  }
+  if (t === 'turn/end') { finishTurn(d.turn, d.time || ev.time); return }
   if (t === 'assistant/message') {
     var content = ((d.message || {}).content) || []
-    var r2 = addRow(key, 'bot')
-    var bubble = el('div', 'bub')
+    var textBubble = null
     for (var i = 0; i < content.length; i++) {
       var b = content[i]
       if (!b) continue
-      if (b.type === 'reasoning' && b.text) { r2.appendChild(thinkBlock(b.text, false)); continue }
-      if (b.type === 'text' && b.text) { bubble.appendChild(el('div', null, b.text)); continue }
-      if (b.type === 'tool-call') { r2.appendChild(toolCard(b.name, b.arguments, b.id)); continue }
+      if (b.type === 'reasoning' && b.text) { appendToTurn(d.turn, thinkBlock(b.text)); continue }
+      if (b.type === 'tool-call') { appendToTurn(d.turn, toolCard(b.name, b.arguments, b.id)); continue }
+      if (b.type === 'text' && b.text) {
+        if (!textBubble) {
+          var row = el('div', 'row bot')
+          textBubble = el('div', 'bub')
+          row.appendChild(textBubble)
+          // 回复气泡插在过程块之后
+          logEl.appendChild(row)
+        }
+        textBubble.appendChild(el('div', null, b.text))
+      }
     }
-    if (bubble.childNodes.length) r2.appendChild(bubble)
-    if (!r2.childNodes.length) r2.appendChild(el('div', 'sysline', '（空消息）'))
     return
   }
-  if (t === 'tool/call') {
-    var r3 = addRow(key, 'bot')
-    r3.appendChild(toolCard(d.name, d.arguments, d.callId))
-    return
-  }
+  if (t === 'tool/call') { appendToTurn(d.turn, toolCard(d.name, d.arguments, d.callId)); return }
   if (t === 'tool/result') {
     var card = cards.get(d.toolCallId)
     var out = textOfContent((d.message || {}).content)
     var isErr = !!(d.message && d.message.isError)
+    var res = el('div', 'res')
+    if (isErr) res.appendChild(el('div', null, '⚠️ 出错'))
+    res.appendChild(el('pre', null, out || '（无输出）'))
     if (card) {
-      var box = el('div', 'res')
-      if (isErr) box.appendChild(el('div', null, '⚠️ 出错'))
-      box.appendChild(el('pre', null, out || '（无输出）'))
-      card.appendChild(box)
+      card.appendChild(res)
       if (isErr) card.open = true
     } else {
-      var r4 = addRow(key, 'bot')
-      var c2 = el('details', 'tool')
-      c2.appendChild(el('summary', null, 'tool result'))
-      c2.appendChild(el('pre', null, out))
-      r4.appendChild(c2)
+      var t2 = el('details', 'tool')
+      t2.appendChild(el('summary', null, 'tool result'))
+      t2.appendChild(el('pre', null, out))
+      appendToTurn(d.turn, t2)
     }
     return
   }
-  if (t === 'session/title' && d.title) { return }   // 标题只在 header 显示，不占消息流
-  var r5 = addRow(key, 'sysline')
-  r5.appendChild(el('div', null, t))
+  if (t === 'session/title') return
+  if (/^(step\\/|request\\/|agent\\/inbox)/.test(t)) return   // 过程噪音不占屏
+  var r5 = el('div', 'row')
+  r5.appendChild(el('div', 'sysline', t))
+  logEl.appendChild(r5)
 }
 
 // ── SSE ─────────────────────────────────────────────────────
@@ -301,9 +391,7 @@ function paintQueue() {
   $('curSub').textContent = parts.join(' · ') || (cur ? '空闲' : '连接中…')
   if (n > 0) {
     list.innerHTML = ''
-    queueItems.forEach(function (s) {
-      list.appendChild(el('div', 'qi', oneLine(s, 160)))
-    })
+    queueItems.forEach(function (s) { list.appendChild(el('div', 'qi', oneLine(s, 160))) })
   } else { list.style.display = 'none' }
 }
 $('queueToggle').onclick = function () {
@@ -314,7 +402,13 @@ $('queueToggle').onclick = function () {
 }
 
 function closeStream() { if (es) { es.close(); es = null } setRunning(false) }
-function clearLog() { rows.forEach(function (r) { r.remove() }); rows = new Map(); cards = new Map(); live = { text: '', think: '', tRow: null, kRow: null } }
+function clearLog() {
+  rows.forEach(function (r) { r.remove() })
+  rows = new Map(); cards = new Map(); turns = new Map()
+  live = { text: '', think: '', tRow: null, kRow: null }
+  var kids = Array.prototype.slice.call(logEl.children)
+  kids.forEach(function (k) { k.remove() })
+}
 
 function follow(sid) {
   closeStream(); clearLog()
@@ -343,8 +437,13 @@ function onFrame(f) {
     var title = str(vals.title)
     if (title && cur) { cur.title = title; $('curTitle').textContent = title }
     var ms = vals.modelSelection || {}
-    curModel = ms.next || ms.lastUsed || curModel
-    paintModelBtn()
+    var sel = ms.next || ms.lastUsed
+    if (sel && !modelOverride) { curModel = sel }
+    if (vals.permissions) curPerm = String(vals.permissions.currentValue || curPerm)
+    usage.tokenUsage = vals.tokenUsage || usage.tokenUsage
+    usage.contextPressure = vals.contextPressure || usage.contextPressure
+    usage.contextBreakdown = vals.contextBreakdown || usage.contextBreakdown
+    paintModelBtn(); paintPermBtn(); paintCtx()
     var recs = f.records || []
     for (var i = 0; i < recs.length; i++) onRecord(recs[i])
     scrollDown()
@@ -376,7 +475,13 @@ function onLive(fr) {
     var c = fr.chunk || {}
     if (c.type === 'reasoning-delta' && typeof c.text === 'string') {
       live.think += c.text
-      if (!live.kRow) { live.kRow = addRow('live-think', 'bot'); live.kRow.appendChild(thinkBlock('', true)) }
+      if (!live.kRow) {
+        live.kRow = el('div', 'row bot')
+        var tb = thinkBlock('')          // 默认折叠
+        live.kRow.appendChild(tb)
+        logEl.appendChild(live.kRow)
+        appendToTurn('cur', live.kRow)   // 归入当前 turn 的过程块
+      }
       var pre = live.kRow.querySelector('pre'), sum = live.kRow.querySelector('summary')
       if (pre) pre.textContent = live.think
       if (sum) sum.textContent = '思考中… · ' + live.think.length + ' 字'
@@ -386,19 +491,20 @@ function onLive(fr) {
     var txt = (typeof c.text === 'string') ? c.text : ''
     if (txt) {
       live.text += txt
-      if (!live.tRow) { live.tRow = addRow('live-text', 'bot'); live.tRow.appendChild(el('div', 'bub')) }
+      if (!live.tRow) {
+        live.tRow = el('div', 'row bot')
+        live.tRow.appendChild(el('div', 'bub'))
+        logEl.appendChild(live.tRow)
+      }
       live.tRow.firstChild.textContent = live.text
       scrollDown()
     }
     return
   }
-  if (fr.type === 'end') {
-    if (live.kRow) { var d = live.kRow.querySelector('details'); if (d) d.open = false }
-    live = { text: '', think: '', tRow: null, kRow: null }
-  }
+  if (fr.type === 'end') { live = { text: '', think: '', tRow: null, kRow: null } }
 }
 
-// ── 会话状态轮询（running / 队列 / 模型 与 DSH 同步） ───────
+// ── 状态轮询（运行/队列/模型/权限/用量，与 DSH 同步） ────────
 function startStatusPolling(sid) {
   if (statusTimer) clearInterval(statusTimer)
   var tick = async function () {
@@ -407,96 +513,116 @@ function startStatusPolling(sid) {
       var r = await api('status', { sid: sid })
       var v = r.value || {}
       if (v.title && (!cur.title || cur.title !== v.title)) { cur.title = v.title; $('curTitle').textContent = v.title }
-      if (v.modelSelection) { curModel = v.modelSelection; paintModelBtn() }
+      // 模型：用户刚切过的选择优先（服务器投影可能滞后一拍）
+      var sel = v.modelSelection
+      if (modelOverride) {
+        if (sel && sel.provider === modelOverride.provider && sel.model === modelOverride.model) modelOverride = null
+      } else if (sel && (sel.provider || sel.model)) {
+        curModel = sel
+      }
+      if (v.permissions) curPerm = String(v.permissions.currentValue || curPerm)
+      if (v.tokenUsage) usage.tokenUsage = v.tokenUsage
+      if (v.contextPressure) usage.contextPressure = v.contextPressure
+      if (v.contextBreakdown) usage.contextBreakdown = v.contextBreakdown
       queueItems = (v.queue && (v.queue.nextTurn || []).concat(v.queue.nextStep || [])) || []
       setRunning(!!v.running)
+      paintModelBtn(); paintPermBtn(); paintCtx()
     } catch (e) { /* 忽略单次失败 */ }
   }
   tick()
   statusTimer = setInterval(tick, 3000)
 }
 
-// ── 工作区 / 会话（只列工作区内的会话，与 DSH 侧栏同源） ────
-async function loadSidebar() {
-  var box = $('sessList')
-  box.textContent = '加载中…'
-  try {
-    var sres = await api('sessions', {})
-    sessions = (sres.value && sres.value.items) || []
-    var wres = await api('workspaces', {})
-    var w = wres.value || {}
-    wsItems = w.items || []
-    archived = {}
-    ;(w.archivedSessionIds || []).forEach(function (id) { archived[id] = true })
-    paintSidebar(box)
-  } catch (e) {
-    box.textContent = '加载失败：' + e
-  }
+// ── 上下文 / token 用量（与 DSH 同算法：projectedTokens ?? pressureTokens / contextWindow） ──
+function occupancy() {
+  var p = usage.contextPressure || {}
+  var used = (p.projectedTokens != null) ? p.projectedTokens : p.pressureTokens
+  if (used == null || p.contextWindow == null || !p.contextWindow) return null
+  return { percent: Math.min(100, Math.round(used / p.contextWindow * 100)), used: used, window: p.contextWindow }
 }
-
-function paintSidebar(box) {
+function paintCtx() {
+  var btn = $('ctxBtn')
+  btn.innerHTML = ''
+  var occ = occupancy()
+  if (!occ) { btn.style.display = 'none'; return }
+  btn.style.display = 'flex'
+  var R = 5.5, C = 2 * Math.PI * R
+  var ns = 'http://www.w3.org/2000/svg'
+  var svg = document.createElementNS(ns, 'svg')
+  svg.setAttribute('viewBox', '0 0 14 14'); svg.setAttribute('width', '14'); svg.setAttribute('height', '14')
+  var track = document.createElementNS(ns, 'circle')
+  track.setAttribute('cx', '7'); track.setAttribute('cy', '7'); track.setAttribute('r', String(R))
+  track.setAttribute('fill', 'none'); track.setAttribute('stroke', '#e8eaee'); track.setAttribute('stroke-width', '2')
+  var fill = document.createElementNS(ns, 'circle')
+  fill.setAttribute('cx', '7'); fill.setAttribute('cy', '7'); fill.setAttribute('r', String(R))
+  fill.setAttribute('fill', 'none'); fill.setAttribute('stroke', occ.percent >= 85 ? '#d92d20' : (occ.percent >= 60 ? '#f79009' : '#2f6fed'))
+  fill.setAttribute('stroke-width', '2'); fill.setAttribute('stroke-linecap', 'round')
+  fill.setAttribute('stroke-dasharray', (C * occ.percent / 100).toFixed(2) + ' ' + C.toFixed(2))
+  fill.setAttribute('transform', 'rotate(-90 7 7)')
+  svg.appendChild(track); svg.appendChild(fill)
+  btn.appendChild(svg)
+  btn.appendChild(el('span', null, occ.percent + '%'))
+  btn.title = '上下文已用 ' + occ.percent + '%（' + fmtTokens(occ.used) + ' / ' + fmtTokens(occ.window) + '）'
+}
+function paintCtxSheet() {
+  var box = $('ctxBody')
   box.innerHTML = ''
-  var byId = {}
-  sessions.forEach(function (s) { byId[s.sessionId] = s })
-  var used = {}
-  var shown = 0
-
-  function sessRow(s) {
-    // 已归档 / 子代理会话不显示（与 DSH 侧栏一致）
-    if (!s || archived[s.sessionId] || s.origin === 'subagent') return null
-    used[s.sessionId] = true
-    shown++
-    var d = el('div', 'sess' + (cur && cur.sessionId === s.sessionId ? ' active' : ''))
-    d.appendChild(el('div', 't', s.title || s.sessionId.slice(0, 16)))
-    if (s.running) d.appendChild(el('span', 'st run', '运行中'))
-    else if (s.blank) d.appendChild(el('span', 'st', '空'))
-    d.onclick = function () { openSession(s); closeSheets() }
-    return d
+  var occ = occupancy()
+  if (!occ) { box.appendChild(el('div', 'sysline', '该会话暂无上下文数据（模型尚未上报用量）')); return }
+  box.appendChild(el('div', 'ctxHead', '上下文已用 ' + occ.percent + '%（' + fmtTokens(occ.used) + ' / ' + fmtTokens(occ.window) + '）'))
+  var bd = usage.contextBreakdown || null
+  var total = bd ? (bd.systemTokens || 0) + (bd.toolsTokens || 0) + (bd.messageTokens || 0) : 0
+  var bar = el('div', 'ctxBar')
+  if (bd && total > 0) {
+    ;[['systemTokens', 'var(--sys)'], ['toolsTokens', 'var(--tools)'], ['messageTokens', 'var(--msgs)']].forEach(function (pair) {
+      var w = occ.percent * (bd[pair[0]] || 0) / total
+      if (w <= 0) return
+      var seg = el('i'); seg.style.width = w + '%'; seg.style.background = pair[1]
+      bar.appendChild(seg)
+    })
+  } else {
+    var seg = el('i'); seg.style.width = occ.percent + '%'; seg.style.background = 'var(--accent)'
+    bar.appendChild(seg)
   }
-
-  wsItems.forEach(function (ws) {
-    var group = el('div', 'ws')
-    var head = el('div', 'name')
-    head.appendChild(el('b', null, ws.title || ws.path))
-    head.appendChild(el('span', 'path', ws.path || ''))
-    group.appendChild(head)
-    var any = false
-    ;(ws.sessionIds || []).forEach(function (id) { var r = sessRow(byId[id]); if (r) { group.appendChild(r); any = true } })
-    if (!any) group.appendChild(el('div', 'sysline', '（无会话）'))
-    box.appendChild(group)
-  })
-
-  // 其余会话（无工作区归属的杂项）默认折叠，不干扰阅读
-  var others = sessions.filter(function (s) {
-    return !used[s.sessionId] && !archived[s.sessionId] && s.origin !== 'subagent'
-  })
-  if (others.length) {
-    var det = el('details', 'others')
-    det.appendChild(el('summary', null, '其他会话（' + others.length + '）'))
-    others.forEach(function (s) { var r = sessRow(s); if (r) det.appendChild(r) })
-    box.appendChild(det)
+  box.appendChild(bar)
+  if (bd) {
+    ;[['systemTokens', '系统提示', 'var(--sys)'], ['toolsTokens', '工具定义', 'var(--tools)'], ['messageTokens', '对话内容', 'var(--msgs)']].forEach(function (row) {
+      var r = el('div', 'ctxRow')
+      var sw = el('span', 'sw'); sw.style.background = row[2]
+      r.appendChild(sw)
+      r.appendChild(el('span', 'k', row[1]))
+      r.appendChild(el('span', 'v', fmtTokens(bd[row[0]] || 0)))
+      box.appendChild(r)
+    })
+    box.appendChild(el('div', 'ctxSep'))
   }
-  var hiddenArch = sessions.filter(function (s) { return archived[s.sessionId] }).length
-  var hiddenSub = sessions.filter(function (s) { return s.origin === 'subagent' && !archived[s.sessionId] }).length
-  box.appendChild(el('div', 'sysline',
-    '共 ' + shown + ' 条可见 · 已隐藏 ' + hiddenArch + ' 条归档 / ' + hiddenSub + ' 条子代理'))
+  var tu = usage.tokenUsage || {}
+  ;[['uncachedInputTokens', '输入（未缓存）'], ['cacheReadTokens', '输入（缓存读）'], ['cacheWriteTokens', '缓存写'], ['outputTokens', '输出']].forEach(function (row) {
+    var v = tu[row[0]]
+    if (v == null) return
+    var r = el('div', 'ctxRow')
+    r.appendChild(el('span', 'k', row[1]))
+    r.appendChild(el('span', 'v', fmtTokens(v)))
+    box.appendChild(r)
+  })
 }
 
 // ── 模型 ────────────────────────────────────────────────────
-function paintModelBtn() {
+function modelDisplayName(sel) {
+  if (!sel) return ''
   var name = ''
-  var sel = curModel
-  // 有些会话的列表投影不含 modelSelection：回退到 DSH 的默认模型（就是实际会用的那个）
-  if (!sel && modelCatalog && modelCatalog.default && modelCatalog.default.provider) sel = modelCatalog.default
-  if (sel && modelCatalog) {
+  if (modelCatalog) {
     (modelCatalog.groups || []).forEach(function (g) {
       if (g.id !== sel.provider) return
       ;(g.models || []).forEach(function (m) { if (m.id === sel.model) name = m.name || m.id })
     })
   }
-  if (!name && sel) name = sel.model
-  var label = $('modelBtn').querySelector('.mn')
-  if (label) label.textContent = name || '模型'
+  return name || sel.model || ''
+}
+function paintModelBtn() {
+  var sel = curModel || (modelCatalog && modelCatalog.default && modelCatalog.default.provider ? modelCatalog.default : null)
+  var label = $('modelBtn').querySelector('.lb')
+  if (label) label.textContent = modelDisplayName(sel) || '模型'
   $('modelBtn').title = sel ? (sel.provider + ' / ' + sel.model + (sel.reasoningEffort ? ' / ' + sel.reasoningEffort : '')) : '选择模型'
 }
 
@@ -554,44 +680,168 @@ function pickModel(provider, m) {
 async function selectModel(provider, model, reasoningEffort) {
   if (!cur) { alert('先选择一个会话'); return }
   try {
-    await api('selectModel', { sid: cur.sessionId, provider: provider, model: model, reasoningEffort: reasoningEffort })
-    curModel = { provider: provider, model: model }
-    if (reasoningEffort) curModel.reasoningEffort = reasoningEffort
+    var res = await api('selectModel', { sid: cur.sessionId, provider: provider, model: model, reasoningEffort: reasoningEffort })
+    var sel = (res.value && res.value.selected) || { provider: provider, model: model }
+    if (reasoningEffort) sel.reasoningEffort = reasoningEffort
+    curModel = sel
+    modelOverride = { provider: sel.provider, model: sel.model }   // 防状态轮询用旧值覆盖
     paintModelBtn()
     loadModels()
   } catch (e) { alert('切换失败：' + e) }
 }
 
+// ── 权限 ────────────────────────────────────────────────────
+function permDisplayName(v) {
+  if (!v) return '权限'
+  var name = ''
+  ;((permCatalog && permCatalog.options) || []).forEach(function (o) { if (o.value === v) name = o.name || o.value })
+  return name || v
+}
+function paintPermBtn() {
+  var lb = $('permBtn').querySelector('.lb')
+  if (lb) lb.textContent = permDisplayName(curPerm)
+  $('permBtn').title = curPerm ? ('当前权限：' + curPerm + '（切换后桌面 DSH 同步）') : '权限'
+}
+async function loadPermissions() {
+  var box = $('permList')
+  box.textContent = '加载中…'
+  try {
+    var res = await api('permissions', { sid: cur ? cur.sessionId : '' })
+    permCatalog = (res.value && res.value.catalog) || null
+    if (res.value && res.value.current) curPerm = res.value.current
+    paintPermList(box)
+    paintPermBtn()
+  } catch (e) { box.textContent = '加载失败：' + e }
+}
+function paintPermList(box) {
+  box.innerHTML = ''
+  if (!permCatalog) { box.textContent = '无权限目录'; return }
+  var opts = permCatalog.options || []
+  opts.forEach(function (o) {
+    var isCur = curPerm === o.value
+    var row = el('div', 'mrow' + (isCur ? ' cur' : ''))
+    var mn = el('div', 'mn')
+    mn.appendChild(el('b', null, o.name || o.value))
+    mn.appendChild(el('span', null, o.value + (o.description ? ' · ' + o.description : '')))
+    row.appendChild(mn)
+    row.appendChild(el('span', 'go', isCur ? '当前' : '切换'))
+    row.onclick = function () { selectPerm(o.value) }
+    box.appendChild(row)
+  })
+  box.appendChild(el('div', 'sysline', '切换会写入该会话（permission/preset + sandbox/mode + approval/policy），桌面端立即可见'))
+}
+async function selectPerm(preset) {
+  if (!cur) { alert('先选择一个会话'); return }
+  try {
+    await api('selectPermission', { sid: cur.sessionId, preset: preset })
+    curPerm = preset
+    paintPermBtn()
+    loadPermissions()
+    setRunning(running)
+  } catch (e) { alert('切换权限失败：' + e) }
+}
+
+// ── 工作区 / 会话 ───────────────────────────────────────────
+async function loadSidebar() {
+  var box = $('sessList')
+  box.textContent = '加载中…'
+  try {
+    var sres = await api('sessions', {})
+    sessions = (sres.value && sres.value.items) || []
+    var wres = await api('workspaces', {})
+    var w = wres.value || {}
+    wsItems = w.items || []
+    archived = {}
+    ;(w.archivedSessionIds || []).forEach(function (id) { archived[id] = true })
+    paintSidebar(box)
+  } catch (e) {
+    box.textContent = '加载失败：' + e
+  }
+}
+
+function paintSidebar(box) {
+  box.innerHTML = ''
+  var byId = {}
+  sessions.forEach(function (s) { byId[s.sessionId] = s })
+  var used = {}
+  var shown = 0
+  function sessRow(s) {
+    if (!s || archived[s.sessionId] || s.origin === 'subagent') return null
+    used[s.sessionId] = true
+    shown++
+    var d = el('div', 'sess' + (cur && cur.sessionId === s.sessionId ? ' active' : ''))
+    d.appendChild(el('div', 't', s.title || s.sessionId.slice(0, 16)))
+    if (s.running) d.appendChild(el('span', 'st run', '运行中'))
+    else if (s.blank) d.appendChild(el('span', 'st', '空'))
+    d.onclick = function () { openSession(s); closeSheets() }
+    return d
+  }
+  wsItems.forEach(function (ws) {
+    var group = el('div', 'ws')
+    var head = el('div', 'name')
+    head.appendChild(el('b', null, ws.title || ws.path))
+    head.appendChild(el('span', 'path', ws.path || ''))
+    group.appendChild(head)
+    var any = false
+    ;(ws.sessionIds || []).forEach(function (id) { var r = sessRow(byId[id]); if (r) { group.appendChild(r); any = true } })
+    if (!any) group.appendChild(el('div', 'sysline', '（无会话）'))
+    box.appendChild(group)
+  })
+  var others = sessions.filter(function (s) {
+    return !used[s.sessionId] && !archived[s.sessionId] && s.origin !== 'subagent'
+  })
+  if (others.length) {
+    var det = el('details', 'others')
+    det.appendChild(el('summary', null, '其他会话（' + others.length + '）'))
+    others.forEach(function (s) { var r = sessRow(s); if (r) det.appendChild(r) })
+    box.appendChild(det)
+  }
+  var hiddenArch = sessions.filter(function (s) { return archived[s.sessionId] }).length
+  var hiddenSub = sessions.filter(function (s) { return s.origin === 'subagent' && !archived[s.sessionId] }).length
+  box.appendChild(el('div', 'sysline', '共 ' + shown + ' 条可见 · 已隐藏 ' + hiddenArch + ' 条归档 / ' + hiddenSub + ' 条子代理'))
+}
+
 // ── 交互 ────────────────────────────────────────────────────
-function closeSheets() { $('drawer').classList.remove('open'); $('modelSheet').classList.remove('open') }
-$('menu').onclick = function () { $('drawer').classList.add('open'); loadSidebar() }
-$('modelBtn').onclick = function () { $('modelSheet').classList.add('open'); loadModels() }
-$('drawer').onclick = function (e) { if (e.target.id === 'drawer') closeSheets() }
-$('modelSheet').onclick = function (e) { if (e.target.id === 'modelSheet') closeSheets() }
+function closeSheets() {
+  ;['drawer', 'sheetModel', 'sheetCtx', 'sheetPerm'].forEach(function (id) { $(id).classList.remove('open') })
+}
+function openSheet(id) { closeSheets(); $(id).classList.add('open') }
+$('menu').onclick = function () { openSheet('drawer'); loadSidebar() }
+$('modelBtn').onclick = function () { openSheet('sheetModel'); loadModels() }
+$('permBtn').onclick = function () { openSheet('sheetPerm'); loadPermissions() }
+$('ctxBtn').onclick = function () { openSheet('sheetCtx'); paintCtxSheet() }
+;$(['drawer', 'sheetModel', 'sheetCtx', 'sheetPerm']).forEach(function (id) {
+  $(id).onclick = function (e) { if (e.target.id === id) closeSheets() }
+})
 $('jumpDown').onclick = scrollDown
 
-function openSession(s) { cur = { sessionId: s.sessionId, title: s.title }; follow(s.sessionId) }
+function openSession(s) {
+  cur = { sessionId: s.sessionId, title: s.title }
+  modelOverride = null
+  follow(s.sessionId)
+}
 
 function sendText() {
   var t = $('txt').value.trim()
   if (!t) return
   $('txt').value = ''; autoGrow()
   if (!cur) { alert('先从 ☰ 选择一个会话'); return }
-  var r = addRow('local-' + (++counter), 'user')
+  var r = el('div', 'row user')
   r.appendChild(el('div', 'bub', t))
+  logEl.appendChild(r)
   scrollDown()
   api('prompt', {
     sid: cur.sessionId, text: t,
     mode: running ? 'queue' : 'steer',
     clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
   }).then(function () {
-    setRunning(true)
-    // 排队时立即在状态条上体现
     if (running) { queueItems.push(t); paintQueue() }
+    setRunning(true)
     setTimeout(function () { if (cur) startStatusPolling(cur.sessionId) }, 400)
   }).catch(function (e) {
-    var rr = addRow('err-' + (++counter), 'sysline')
-    rr.appendChild(el('div', null, '发送失败：' + (e && e.message ? e.message : e)))
+    var rr = el('div', 'row')
+    rr.appendChild(el('div', 'sysline', '发送失败：' + (e && e.message ? e.message : e)))
+    logEl.appendChild(rr)
   })
 }
 $('send').onclick = sendText
@@ -599,7 +849,7 @@ $('stop').onclick = function () { if (cur) api('cancel', { sid: cur.sessionId })
 $('txt').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText() } })
 $('txt').addEventListener('input', autoGrow)
 
-// 初始：自动打开最近一个未归档、非子代理的会话
+// 初始：自动打开最近一个未归档、非子代理、属于工作区的会话
 ;(async function boot() {
   try {
     var sres = await api('sessions', {})
@@ -622,7 +872,7 @@ $('txt').addEventListener('input', autoGrow)
       if (!archived[s2.sessionId] && s2.origin !== 'subagent') { first = s2; break }
     }
     if (first) openSession(first)
-    else { var r = addRow('boot', 'sysline'); r.appendChild(el('div', null, '没有可见会话：点 ☰ 选择工作区')) }
+    else { var r = el('div', 'row'); r.appendChild(el('div', 'sysline', '没有可见会话：点 ☰ 选择工作区')); logEl.appendChild(r) }
   } catch (e) { /* 未登录时 api() 已跳转 */ }
 })()
 </script></body></html>`

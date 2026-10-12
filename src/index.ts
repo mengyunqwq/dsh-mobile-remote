@@ -16,6 +16,7 @@ import type WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { HostConnectionHandle, ConnectionTrustRequest } from '@deepseek-ai/dsh-client-connection'
 import type SessionControllerModule from '@deepseek-ai/dsh-api-session-controller'
 import type WorkspaceControllerModule from '@deepseek-ai/dsh-api-workspace-controller'
+import type PermissionPresetServiceModule from '@deepseek-ai/dsh-permission-presets'
 import type { SessionPromptRequest, SessionAddress, SessionCancelRequest, SessionSelectModelRequest } from '@deepseek-ai/dsh-api-session-controller/types'
 import z from '@deepseek-ai/schemastery'
 import { renderMobilePage } from './page.js'
@@ -41,10 +42,11 @@ type AppContext = Context & {
   connection: HostConnectionHandle
   sessionController: SessionControllerModule
   workspaceController: WorkspaceControllerModule
+  permissionPresets: PermissionPresetServiceModule
 }
 
 export const name = "@dsh-external/dsh-mobile-remote"
-export const inject = ['webServer', 'connection', 'sessionController', 'workspaceController']
+export const inject = ['webServer', 'connection', 'sessionController', 'workspaceController', 'permissionPresets']
 
 export function apply(ctx: AppContext, config: TunnelConfig): void {
   applyInner(ctx, config ?? {})
@@ -355,7 +357,7 @@ async function authed(){
           break
         }
         case 'status': {
-          // 轻量会话状态：运行中？排队几条？当前模型？标题？
+          // 轻量会话状态：运行中？排队几条？当前模型？权限？token/上下文用量？
           // （running/inbox 只在会话摘要里，follow 快照不含 running —— 实测踩坑）
           const sid = String(body.sid)
           const list = await ctx.sessionController.list({}, new AbortController().signal)
@@ -376,11 +378,42 @@ async function authed(){
             blank: !!row?.blank,
             title: row ? readProjectionTitle(row) : '',
             modelSelection: vals.modelSelection ?? null,
+            // 权限（与 DSH 同一投影：{currentValue}）
+            permissions: vals.permissions ?? null,
+            // token 用量与上下文占用（dsh-token-meter 的投影，与桌面同源）
+            tokenUsage: vals.tokenUsage ?? null,
+            contextPressure: vals.contextPressure ?? null,
+            contextBreakdown: vals.contextBreakdown ?? null,
             queue: {
               nextTurn: texts(inbox['next-turn']),
               nextStep: texts(inbox['next-step']),
             },
           }
+          break
+        }
+        case 'permissions': {
+          // 进程级权限目录（与桌面同一 catalog）+ 指定会话的当前值
+          const catalog = ctx.permissionPresets.catalog()
+          const sid = String(body.sid ?? '')
+          let current = ''
+          if (sid) {
+            const list = await ctx.sessionController.list({}, new AbortController().signal)
+            const row = list.items.find(i => String(i.sessionId) === sid)
+            const vals = (row?.projections?.values ?? {}) as Record<string, any>
+            current = String(vals.permissions?.currentValue ?? '')
+          }
+          value = { catalog, current }
+          break
+        }
+        case 'selectPermission': {
+          // 切权限：与桌面 GUI 同一条链路（写 permission/preset + sandbox/mode + approval/policy 三个 knob 事件）
+          const sid = String(body.sid)
+          const preset = String(body.preset)
+          if (!sid || !preset) throw new Error('缺少 sid/preset')
+          const resolved = await ctx.sessionController.resolveAgent(sid as never)
+          if (!('agent' in resolved) || !resolved.agent) throw new Error('该会话当前无法解析 agent（可能未激活）')
+          ctx.permissionPresets.set((resolved.agent as any).session, preset)
+          value = { applied: preset }
           break
         }
         case 'selectModel': {

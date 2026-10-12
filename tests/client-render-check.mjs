@@ -188,6 +188,8 @@ if (pageHtml) {
     ['归档过滤：首屏自动打开的会话', 'if (!archived[s.sessionId] && s.origin !=='],
     ['归档提示可见', '已隐藏 '],
     ['模型切换写回会话', "api('selectModel'"],
+    ['模型切换后按钮回显所选模型', 'var sel = (res.value && res.value.selected)'],
+    ['模型回显不被旧投影覆盖', 'modelOverride'],
     ['子代理会话不显示', "s.origin === 'subagent'"],
     ['其他会话默认折叠', "el('details', 'others')"],
     ['发送为图标按钮（SVG 上箭头）', 'M12 19V5'],
@@ -196,6 +198,16 @@ if (pageHtml) {
     ['任务状态：排队条数', "'排队 '"],
     ['任务状态来自 status 接口', "api('status'"],
     ['状态轮询', 'setInterval(tick, 3000)'],
+    ['思考默认折叠（构造时不展开）', "function thinkBlock(text) {"],
+    ['turn 过程折叠为「已完成」并带时间', "'已完成 · ' + hhmmss"],
+    ['turn 结束收起过程块', 't.box.open = false'],
+    ['上下文圆环（百分比）', "btn.appendChild(el('span', null, occ.percent + '%'))"],
+    ['上下文算法与 DSH 一致', 'projectedTokens != null'],
+    ['上下文面板：占比条', "el('div', 'ctxBar')"],
+    ['token 用量面板', "'输出'"],
+    ['权限目录接口', "api('permissions'"],
+    ['权限切换接口', "api('selectPermission'"],
+    ['权限按钮', 'id="permBtn"'],
   ]
   for (const [label, needle] of mustHave) {
     check(`手机页能力：${label}`, () => {
