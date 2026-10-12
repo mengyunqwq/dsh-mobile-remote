@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-mobile-remote",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "手机端远程操控 DSH：移动端 UI 面板 + SSE 会话流 + 扫码配对（局域网/云隧道跨网直连）",
   "private": true,
   "type": "module",
@@ -25,6 +25,7 @@
     "@deepseek-ai/dsh-api-session-controller": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-connection": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-client-ui-slots": ">=0.0.1-rc <2",
+    "@deepseek-ai/dsh-api-workspace-controller": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-host-webserver": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-llm": ">=0.0.1-rc <2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
@@ -66,5 +67,6 @@
     }
   }
 }
+
 
 

@@ -148,7 +148,7 @@ function MobileConsole(): unknown {
         h('div', { style: { marginTop: 6 } }, h(CopyButton, { text: u.url })))))
 
   const tunnelCard = h('div', { style: { ...S.card, display: 'flex', gap: 14 } },
-    ready ? h(Qr, { key: 'qr', text: tunnel!.pairCode ? `${tunnel!.url}?pair=${tunnel!.pairCode}` : tunnel!.url! }) : null,
+    ready ? h(Qr, { key: 'qr', text: tunnel!.pairCode ? `${tunnel!.url}/mobile?pair=${tunnel!.pairCode}` : tunnel!.url! }) : null,
     h('div', { key: 'info', style: { minWidth: 0, flex: 1 } },
       h('div', null, h('b', null, '☁️ 云隧道 · 跨网可用'),
         h('span', { style: S.pill(ready) }, tunnel?.status ?? (loading ? '加载中' : '未启用'))),
@@ -160,7 +160,7 @@ function MobileConsole(): unknown {
         '配对码：', h('b', { style: { fontSize: 18, letterSpacing: 3 } }, tunnel!.pairCode ?? '—'),
         h('span', { style: { ...S.dim, marginLeft: 6 } }, '（二维码已内嵌配对码；拍不到时手输）')) : null,
       ready ? h('div', { style: { marginTop: 6 } }, h(CopyButton, {
-        text: tunnel!.pairCode ? `${tunnel!.url}?pair=${tunnel!.pairCode}` : tunnel!.url!,
+        text: tunnel!.pairCode ? `${tunnel!.url}/mobile?pair=${tunnel!.pairCode}` : tunnel!.url!,
         label: '复制连接地址',
       })) : null,
       tunnel?.lastError ? h('div', { style: S.warn }, `隧道错误：${tunnel.lastError}`) : null))
@@ -223,7 +223,7 @@ function SettingsQrPanel(): unknown {
     error ? h('div', { style: S.warn }, error) : null,
     ready ? h('div', { style: S.row },
       h('div', { style: { ...S.card, display: 'flex', gap: 14 } },
-        h(Qr, { key: 'qr', text: tunnel!.pairCode ? `${tunnel!.url}?pair=${tunnel!.pairCode}` : tunnel!.url! }),
+        h(Qr, { key: 'qr', text: tunnel!.pairCode ? `${tunnel!.url}/mobile?pair=${tunnel!.pairCode}` : tunnel!.url! }),
         h('div', { key: 'info' },
           h('div', null, h('b', null, '☁️ 云隧道（跨网）')),
           h('code', { style: S.code }, tunnel!.url!),

@@ -15,7 +15,8 @@ import { fileURLToPath } from 'node:url'
 import type WebServer from '@deepseek-ai/dsh-host-webserver'
 import type { HostConnectionHandle, ConnectionTrustRequest } from '@deepseek-ai/dsh-client-connection'
 import type SessionControllerModule from '@deepseek-ai/dsh-api-session-controller'
-import type { SessionPromptRequest, SessionAddress, SessionCancelRequest } from '@deepseek-ai/dsh-api-session-controller/types'
+import type WorkspaceControllerModule from '@deepseek-ai/dsh-api-workspace-controller'
+import type { SessionPromptRequest, SessionAddress, SessionCancelRequest, SessionSelectModelRequest } from '@deepseek-ai/dsh-api-session-controller/types'
 import z from '@deepseek-ai/schemastery'
 import { renderMobilePage } from './page.js'
 import { CloudflareTunnel } from './tunnel.js'
@@ -39,10 +40,11 @@ type AppContext = Context & {
   webServer: WebServer
   connection: HostConnectionHandle
   sessionController: SessionControllerModule
+  workspaceController: WorkspaceControllerModule
 }
 
 export const name = "@dsh-external/dsh-mobile-remote"
-export const inject = ['webServer', 'connection', 'sessionController']
+export const inject = ['webServer', 'connection', 'sessionController', 'workspaceController']
 
 export function apply(ctx: AppContext, config: TunnelConfig): void {
   applyInner(ctx, config ?? {})
@@ -121,21 +123,33 @@ ${codeGiven ? '<p style="color:#b91c1c">配对码不正确。</p>' : ''}
 </body>`)
         return true
       }
-      // 公网拿到正确配对码 / 局域网访客：直接自动兑换登录
+      // 公网拿到正确配对码 / 局域网访客：一步自动兑换登录
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
       const loginUrl = ctx.connection.authenticatedUrl(origin)
       res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <body style="font-family:system-ui;padding:2rem;max-width:30em;margin:auto">
-<h2>🔐 手机端登录</h2><p id="st" style="color:#889">正在自动登录…</p>
-<p>若长时间未跳转，<a href="${loginUrl}" style="color:#4c8dff">点此手动登录</a>，然后刷新本页。</p>
-<iframe src="${loginUrl}" style="width:0;height:0;border:0" title="login"></iframe>
+<h2>🔐 正在连接…</h2><p id="st" style="color:#889">正在完成配对（通常 1 秒内）</p>
+<p style="font-size:13px;color:#aaa">若 10 秒仍未进入，<a href="${loginUrl}" style="color:#4c8dff">点此手动登录</a>后回到本页。</p>
 <script>
-var t = setInterval(function(){
-  fetch('/mobile/api/ping', {method:'POST'}).then(function(r){
-    if (r.ok) { clearInterval(t); location.replace('/mobile?t=' + Date.now()) }
-  }).catch(function(){})
-}, 1200);
-setTimeout(function(){ var s=document.getElementById('st'); if(s) s.textContent='若自动登录未完成，请点上方链接手动登录后刷新。' }, 8000);
+var LOGIN_URL = ${JSON.stringify(loginUrl)};
+function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms) }) }
+async function authed(){
+  try { var r = await fetch('/mobile/api/ping', { method:'POST', credentials:'same-origin' }); return r.ok } catch(e){ return false }
+}
+(async function(){
+  var st = document.getElementById('st');
+  // ① 先用 fetch 触发一次 token 兑换（浏览器会落 Set-Cookie），不加载笨重的桌面 GUI
+  try { await fetch(LOGIN_URL, { credentials:'same-origin', redirect:'manual' }) } catch(e){}
+  for (var i=0;i<12;i++){ if (await authed()) { location.replace('/mobile'); return } await sleep(350) }
+  // ② 兜底：用隐藏 iframe 走一次完整跳转（个别浏览器对 manual redirect 的 Set-Cookie 处理不同）
+  st.textContent = '正在用备用方式登录…';
+  var f = document.createElement('iframe');
+  f.style.cssText = 'position:absolute;width:1px;height:1px;opacity:0';
+  f.src = LOGIN_URL;
+  document.body.appendChild(f);
+  for (var j=0;j<40;j++){ if (await authed()) { location.replace('/mobile'); return } await sleep(500) }
+  st.textContent = '自动登录未完成：请点上方链接手动登录，然后回到本页刷新。';
+})();
 </script></body>`)
       return true
     }
@@ -295,7 +309,7 @@ setTimeout(function(){ var s=document.getElementById('st'); if(s) s.textContent=
         return
       }
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair'] }))
+      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair', 'workspaces', 'models', 'selectModel'] }))
       return
     }
     if (req.method !== 'POST') { res.writeHead(405).end(); return }
@@ -311,6 +325,34 @@ setTimeout(function(){ var s=document.getElementById('st'); if(s) s.textContent=
         case 'ping':
           value = { ok: true }
           break
+        case 'workspaces': {
+          // 工作区 + 归档集合 + 置顶集合：取 follow() 的首帧 baseline（与桌面 GUI 同源）
+          const ac = new AbortController()
+          let baseline: unknown = null
+          try {
+            const it = ctx.workspaceController.follow(ac.signal)
+            for await (const frame of it) {
+              if (frame.type === 'baseline') { baseline = frame.value; break }
+            }
+          } finally {
+            ac.abort()
+          }
+          value = baseline ?? { items: [], archivedSessionIds: [], pinnedSessionIds: [] }
+          break
+        }
+        case 'models': {
+          value = await ctx.sessionController.modelCatalog()
+          break
+        }
+        case 'selectModel': {
+          value = await ctx.sessionController.selectModel({
+            sessionId: String(body.sid),
+            provider: String(body.provider),
+            model: String(body.model),
+            ...(body.reasoningEffort ? { reasoningEffort: String(body.reasoningEffort) } : {}),
+          } as SessionSelectModelRequest)
+          break
+        }
         case 'sessions': {
           const list = await ctx.sessionController.list({}, new AbortController().signal)
           value = {
