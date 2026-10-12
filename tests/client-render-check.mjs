@@ -178,16 +178,24 @@ if (pageHtml) {
   })
 
   const mustHave = [
-    ['浅色主题（白底黑字）', '--bg:#fff'],
+    ['浅色主题（白底黑字）', '--bg:#f7f8fa'],
     ['工作区/会话抽屉', '工作区 / 会话'],
     ['思考内容折叠块（半透明）', 'details.think'],
     ['模型切换按钮', 'id="modelBtn"'],
     ['模型来自 DSH 目录（models 接口）', "api('models'"],
     ['工作区与 DSH 同源（workspaces 接口）', "api('workspaces'"],
     ['归档过滤：抽屉列表', 'archived[s.sessionId]'],
-    ['归档过滤：首屏自动打开的会话', 'if (!archived[items[i].sessionId])'],
+    ['归档过滤：首屏自动打开的会话', 'if (!archived[s.sessionId] && s.origin !=='],
     ['归档提示可见', '已隐藏 '],
     ['模型切换写回会话', "api('selectModel'"],
+    ['子代理会话不显示', "s.origin === 'subagent'"],
+    ['其他会话默认折叠', "el('details', 'others')"],
+    ['发送为图标按钮（SVG 上箭头）', 'M12 19V5'],
+    ['停止按钮（图标）', 'id="stop"'],
+    ['任务状态：执行中', '正在执行'],
+    ['任务状态：排队条数', "'排队 '"],
+    ['任务状态来自 status 接口', "api('status'"],
+    ['状态轮询', 'setInterval(tick, 3000)'],
   ]
   for (const [label, needle] of mustHave) {
     check(`手机页能力：${label}`, () => {
@@ -195,6 +203,16 @@ if (pageHtml) {
       return 'ok'
     })
   }
+  check('手机页结构：模型按钮与发送/停止都在输入框内', () => {
+    const boxStart = pageHtml.indexOf('id="box"')
+    const dockEnd = pageHtml.indexOf('id="drawer"')
+    if (boxStart < 0 || dockEnd < 0 || dockEnd < boxStart) throw new Error('找不到输入框结构')
+    const box = pageHtml.slice(boxStart, dockEnd)
+    for (const id of ['id="modelBtn"', 'id="send"', 'id="stop"']) {
+      if (!box.includes(id)) throw new Error(`${id} 不在输入框容器内`)
+    }
+    return 'modelBtn / send / stop 均在 #box 内'
+  })
   check('负向对照：旧的四个快捷指令按钮必须已移除', () => {
     if (pageHtml.includes('data-cmd')) throw new Error('仍存在快捷指令按钮（data-cmd）')
     return '已移除'

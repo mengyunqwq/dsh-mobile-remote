@@ -1,21 +1,23 @@
 /**
  * 手机端面板（单文件 HTML，内嵌 CSS/JS，零外部依赖）。
  *
- * 与桌面 DSH 对齐的设计：
- *  - 白底黑字（浅色主题）
+ * 与桌面 DSH 对齐：
+ *  - 白底黑字浅色主题，圆角卡片、轻阴影
+ *  - 会话列表只列「工作区内的会话」（DSH 侧栏同源）；子代理会话与已归档会话都不显示，
+ *    其余（无工作区归属的杂项）收进默认折叠的「其他会话」
  *  - 思考内容 = 半透明可展开块（<details>，同 DSH 的 thinking）
- *  - 工作区 / 会话与 DSH 同源（workspaceController.follow baseline + session/list）
- *  - 已归档会话不显示（archivedSessionIds 过滤）
- *  - 模型来自 DSH 的 modelCatalog()，可切换（含 reasoning effort）
- * 数据面：POST /mobile/api/<endpoint>（JSON）+ GET /mobile/stream?sid=…（SSE 事件流）
+ *  - 输入区做成 DSH 的样子：模型按钮在输入框内左侧，发送是圆形图标按钮（框内右下）
+ *  - 任务执行时显示状态：执行中 / 排队 N 条（可展开看排队内容）
+ * 数据面：POST /mobile/api/<endpoint> + GET /mobile/stream?sid=…（SSE）
  *
  * 事件形状（取自真实会话日志）：
  *  user/message      { content:[{type:'text',text}], role:'user' }
  *  assistant/message { message:{ content:[{type:'reasoning',text}|{type:'text',text}|{type:'tool-call',id,name,arguments}] } }
  *  tool/call         { callId, name, arguments }
  *  tool/result       { toolCallId, message:{ content:[{type:'text',text}], isError } }
+ * 会话状态（/status）：{ running, blank, title, modelSelection, queue:{nextTurn[],nextStep[]} }
  *
- * 安全：模型输出一律用 textContent / createElement 渲染，绝不 innerHTML 注入。
+ * 安全：模型输出一律 textContent / createElement，绝不 innerHTML 注入（只用于清空容器）。
  */
 
 const PAGE = `<!doctype html>
@@ -25,78 +27,121 @@ const PAGE = `<!doctype html>
 <meta name="theme-color" content="#ffffff">
 <title>DSH 手机遥控</title>
 <style>
-:root{--bg:#fff;--fg:#111827;--muted:#6b7280;--line:#e5e7eb;--soft:#f3f4f6;--user:#e0e7ff;--accent:#2563eb;--ok:#10b981}
+:root{
+  --bg:#f7f8fa;--card:#fff;--fg:#111827;--muted:#8b93a1;--line:#e8eaee;
+  --soft:#f2f4f7;--user:#e8efff;--accent:#2f6fed;--ok:#12b76a;--warn:#f79009;
+  --radius:16px;--shadow:0 1px 2px rgba(16,24,40,.04),0 4px 14px rgba(16,24,40,.05);
+}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{margin:0;height:100%}
-body{background:var(--bg);color:var(--fg);font:15px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overscroll-behavior:none}
-header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:#fff;border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10;padding-top:calc(10px + env(safe-area-inset-top))}
-header .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600;font-size:15px}
-header .dot{width:8px;height:8px;border-radius:50%;background:var(--line);flex:none}
-header .dot.on{background:var(--ok)}
-button.icon{background:var(--soft);border:none;color:var(--fg);width:36px;height:36px;border-radius:10px;font-size:17px;flex:none;cursor:pointer}
-button.model{background:var(--soft);border:1px solid var(--line);color:var(--fg);border-radius:999px;padding:5px 10px;font-size:12px;max-width:9.5em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:none;cursor:pointer}
-#log{flex:1;overflow-y:auto;padding:12px 12px 4px;-webkit-overflow-scrolling:touch}
-.row{margin:8px 0;max-width:94%}
+body{background:var(--bg);color:var(--fg);font:15px/1.62 -apple-system,BlinkMacSystemFont,system-ui,"PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overscroll-behavior:none}
+header{display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(255,255,255,.92);backdrop-filter:saturate(180%) blur(12px);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10;padding-top:calc(10px + env(safe-area-inset-top))}
+header .title{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650;font-size:15.5px;letter-spacing:.1px}
+header .sub{display:block;font-size:11.5px;color:var(--muted);font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button.ghost{background:transparent;border:none;color:var(--fg);width:34px;height:34px;border-radius:10px;font-size:17px;flex:none;cursor:pointer;display:flex;align-items:center;justify-content:center}
+button.ghost:active{background:var(--soft)}
+#log{flex:1;overflow-y:auto;padding:14px 12px 6px;-webkit-overflow-scrolling:touch;scroll-behavior:smooth}
+.row{margin:9px 0;max-width:93%}
 .row.user{margin-left:auto}
-.bub{border-radius:14px;padding:9px 12px;white-space:pre-wrap;word-break:break-word}
-.user .bub{background:var(--user);border-bottom-right-radius:4px}
-.bot .bub{background:#fff;border:1px solid var(--line);border-bottom-left-radius:4px}
-details.think{background:rgba(107,114,128,.08);border:1px solid rgba(107,114,128,.18);border-left:3px solid rgba(107,114,128,.4);border-radius:10px;padding:6px 10px;margin:6px 0;font-size:13px;color:#4b5563}
-details.think>summary{cursor:pointer;list-style:none;font-weight:600;color:#6b7280;font-size:12px;user-select:none}
+.bub{border-radius:var(--radius);padding:10px 13px;white-space:pre-wrap;word-break:break-word}
+.user .bub{background:var(--user);border-bottom-right-radius:5px}
+.bot .bub{background:var(--card);border:1px solid var(--line);border-bottom-left-radius:5px;box-shadow:var(--shadow)}
+details.think{background:rgba(107,114,128,.07);border:1px solid rgba(107,114,128,.16);border-left:3px solid rgba(107,114,128,.38);border-radius:12px;padding:7px 11px;margin:7px 0;font-size:13px;color:#525c6b}
+details.think>summary{cursor:pointer;list-style:none;font-weight:600;color:#6b7280;font-size:12px;user-select:none;display:flex;align-items:center;gap:5px}
 details.think>summary::-webkit-details-marker{display:none}
-details.think>summary::before{content:"▸ "}
-details.think[open]>summary::before{content:"▾ "}
-details.think pre{margin:6px 0 2px;white-space:pre-wrap;word-break:break-word;font:12px/1.55 ui-monospace,Consolas,monospace;opacity:.9}
-details.tool{background:#f9fafb;border:1px solid var(--line);border-radius:10px;padding:7px 10px;margin:6px 0;font-size:12px}
-details.tool>summary{cursor:pointer;list-style:none;font-family:ui-monospace,Consolas,monospace;color:#374151}
+details.think>summary::before{content:"▸";font-size:10px;opacity:.75}
+details.think[open]>summary::before{content:"▾"}
+details.think pre{margin:7px 0 2px;white-space:pre-wrap;word-break:break-word;font:12px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace;opacity:.92}
+details.tool{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;margin:7px 0;font-size:12.5px;box-shadow:var(--shadow)}
+details.tool>summary{cursor:pointer;list-style:none;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#3f4756;display:flex;gap:6px;align-items:baseline;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 details.tool>summary::-webkit-details-marker{display:none}
-details.tool>summary::before{content:"🔧 "}
-details.tool pre{margin:6px 0 2px;white-space:pre-wrap;word-break:break-word;font:11.5px/1.5 ui-monospace,Consolas,monospace;color:#4b5563;max-height:240px;overflow:auto}
-details.tool .res{margin-top:6px;border-top:1px dashed var(--line);padding-top:6px}
-.sysline{color:#9ca3af;font-size:12px;text-align:center;margin:8px 0}
-#composer{display:flex;gap:8px;align-items:flex-end;padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:#fff;border-top:1px solid var(--line)}
-#txt{flex:1;resize:none;background:#fff;border:1px solid var(--line);color:var(--fg);border-radius:12px;padding:10px 12px;font:inherit;max-height:120px}
-#send{background:var(--accent);border:none;color:#fff;border-radius:12px;padding:11px 16px;font-size:15px;font-weight:600;flex:none;cursor:pointer}
-#cancel{display:none;background:#dc2626;border:none;color:#fff;border-radius:12px;padding:11px 12px;flex:none;cursor:pointer}
-.sheet{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:30;display:none}
+details.tool>summary::before{content:"🔧";font-size:11px}
+details.tool pre{margin:7px 0 2px;white-space:pre-wrap;word-break:break-word;font:11.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#525c6b;max-height:260px;overflow:auto}
+details.tool .res{margin-top:7px;border-top:1px dashed var(--line);padding-top:7px}
+.sysline{color:#a3aab6;font-size:12px;text-align:center;margin:9px 0}
+/* ── 输入区（DSH 样式：模型按钮在框内，圆形图标发送） ── */
+#dock{padding:8px 12px calc(10px + env(safe-area-inset-bottom));background:linear-gradient(180deg,rgba(247,248,250,0),var(--bg) 38%)}
+#queue{display:none;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;margin-bottom:8px;font-size:12.5px;box-shadow:var(--shadow)}
+#queue .dot{width:7px;height:7px;border-radius:50%;background:var(--warn);flex:none}
+#queue.run .dot{background:var(--ok);animation:pulse 1.4s infinite}
+@keyframes pulse{50%{opacity:.35}}
+#queue .txt{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#4b5563}
+#queue button{border:none;background:transparent;color:var(--accent);font-size:12px;cursor:pointer;padding:2px 4px}
+#queueList{display:none;margin:-2px 0 8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;font-size:12.5px;color:#4b5563}
+#queueList .qi{padding:4px 0;border-bottom:1px dashed var(--line);white-space:pre-wrap;word-break:break-word}
+#queueList .qi:last-child{border-bottom:none}
+#box{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:6px 6px 6px 8px}
+#txt{width:100%;resize:none;border:none;outline:none;background:transparent;color:var(--fg);font:inherit;padding:8px 6px 4px;max-height:132px}
+#boxBottom{display:flex;align-items:center;gap:8px;padding:2px 2px 2px 4px}
+#modelBtn{display:flex;align-items:center;gap:5px;background:var(--soft);border:none;color:#4b5563;border-radius:999px;padding:5px 10px;font-size:12px;max-width:58%;cursor:pointer}
+#modelBtn .mn{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#modelBtn .caret{opacity:.55;font-size:10px}
+#boxBottom .spacer{flex:1}
+button.round{width:34px;height:34px;border-radius:50%;border:none;display:flex;align-items:center;justify-content:center;flex:none;cursor:pointer}
+#send{background:var(--accent);color:#fff}
+#send:disabled{background:#c9d3e4;color:#fff}
+#stop{background:#fee4e2;color:#d92d20;display:none}
+/* ── 抽屉 / 模型面板 ── */
+.sheet{position:fixed;inset:0;background:rgba(16,24,40,.34);z-index:30;display:none}
 .sheet.open{display:block}
-.sheet>.panel{position:absolute;background:#fff;box-shadow:0 8px 30px rgba(0,0,0,.18)}
-#drawer>.panel{left:0;top:0;bottom:0;width:86%;max-width:360px;padding:calc(12px + env(safe-area-inset-top)) 10px 12px;overflow-y:auto}
-#modelSheet>.panel{left:0;right:0;bottom:0;max-height:76%;border-radius:16px 16px 0 0;padding:12px 12px calc(12px + env(safe-area-inset-bottom));overflow-y:auto}
-.sheet h3{margin:6px 6px 8px;font-size:13px;color:var(--muted);font-weight:600}
-.ws{margin:10px 0 2px}
-.ws>.name{font-size:12px;color:var(--muted);padding:4px 6px;display:flex;gap:6px;align-items:baseline}
-.ws>.name b{color:var(--fg);font-size:13px;font-weight:600}
-.ws>.name .path{opacity:.7;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sess{display:flex;gap:8px;align-items:center;padding:9px 10px;border-radius:10px;cursor:pointer}
-.sess.active{background:var(--soft)}
-.sess .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14px}
-.sess .st{font-size:10px;border-radius:6px;padding:2px 6px;flex:none;background:var(--soft);color:var(--muted)}
-.sess .st.run{background:#d1fae5;color:#065f46}
-.mrow{display:flex;gap:8px;align-items:center;padding:10px;border-radius:10px;cursor:pointer}
-.mrow.cur{background:#eff6ff}
+.sheet>.panel{position:absolute;background:var(--card);box-shadow:0 10px 40px rgba(16,24,40,.2)}
+#drawer>.panel{left:0;top:0;bottom:0;width:87%;max-width:370px;padding:calc(12px + env(safe-area-inset-top)) 10px 16px;overflow-y:auto;border-radius:0 18px 18px 0}
+#modelSheet>.panel{left:0;right:0;bottom:0;max-height:78%;border-radius:20px 20px 0 0;padding:14px 12px calc(14px + env(safe-area-inset-bottom));overflow-y:auto}
+.sheet h3{margin:4px 8px 10px;font-size:13px;color:var(--muted);font-weight:650;letter-spacing:.2px}
+.ws{margin:12px 0 4px}
+.ws>.name{font-size:12px;color:var(--muted);padding:2px 8px 6px;display:flex;gap:6px;align-items:baseline}
+.ws>.name b{color:var(--fg);font-size:13.5px;font-weight:650}
+.ws>.name .path{opacity:.72;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sess{display:flex;gap:8px;align-items:center;padding:10px 11px;border-radius:12px;cursor:pointer}
+.sess.active{background:#eef3ff}
+.sess .t{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:14.5px}
+.sess .st{font-size:10.5px;border-radius:7px;padding:2px 7px;flex:none;background:var(--soft);color:var(--muted)}
+.sess .st.run{background:#d9f7e8;color:#067647}
+details.others{margin:14px 6px 0}
+details.others>summary{cursor:pointer;list-style:none;font-size:12px;color:var(--muted);padding:6px 2px}
+details.others>summary::-webkit-details-marker{display:none}
+details.others>summary::before{content:"▸ ";}
+details.others[open]>summary::before{content:"▾ ";}
+.mrow{display:flex;gap:10px;align-items:center;padding:11px;border-radius:12px;cursor:pointer}
+.mrow.cur{background:#eef3ff}
 .mrow .mn{flex:1;min-width:0}
-.mrow .mn b{font-weight:600}
-.mrow .mn span{display:block;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.mrow .go{font-size:11px;color:var(--accent);flex:none}
-.efforts{display:flex;gap:6px;flex-wrap:wrap;padding:0 10px 8px 10px}
-.efforts button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:4px 10px;font-size:12px;cursor:pointer}
-.efforts button.cur{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}
-.mprov{margin:10px 6px 2px;font-size:12px;color:var(--muted);font-weight:600}
+.mrow .mn b{font-weight:600;font-size:14.5px}
+.mrow .mn span{display:block;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mrow .go{font-size:11.5px;color:var(--accent);flex:none}
+.mprov{margin:12px 8px 4px;font-size:12px;color:var(--muted);font-weight:650}
+.efforts{display:flex;gap:7px;flex-wrap:wrap;padding:2px 11px 10px}
+.efforts button{border:1px solid var(--line);background:var(--card);border-radius:999px;padding:5px 11px;font-size:12px;cursor:pointer;color:#4b5563}
+.efforts button.cur{background:#eef3ff;border-color:#c7d9ff;color:#1d4ed8}
 </style></head>
 <body>
 <header>
-  <button class="icon" id="menu">☰</button>
-  <span class="dot" id="conn"></span>
-  <div class="title" id="curTitle">DSH 手机遥控</div>
-  <button class="model" id="modelBtn">模型</button>
-  <button class="icon" id="jumpDown">↓</button>
+  <button class="ghost" id="menu" aria-label="会话">☰</button>
+  <div class="title"><span id="curTitle">DSH 手机遥控</span><span class="sub" id="curSub">连接中…</span></div>
+  <button class="ghost" id="jumpDown" aria-label="回到底部">↓</button>
 </header>
+
 <div id="log"></div>
-<div id="composer">
-  <textarea id="txt" rows="1" placeholder="发消息给 agent…"></textarea>
-  <button id="cancel">■ 取消</button>
-  <button id="send">发送</button>
+
+<div id="dock">
+  <div id="queue">
+    <span class="dot"></span>
+    <span class="txt" id="queueTxt"></span>
+    <button id="queueToggle" type="button">查看</button>
+  </div>
+  <div id="queueList"></div>
+  <div id="box">
+    <textarea id="txt" rows="1" placeholder="给 agent 发消息…"></textarea>
+    <div id="boxBottom">
+      <button id="modelBtn" type="button" title="切换模型"><span class="mn">模型</span><span class="caret">▾</span></button>
+      <span class="spacer"></span>
+      <button class="round" id="stop" type="button" aria-label="停止">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+      </button>
+      <button class="round" id="send" type="button" aria-label="发送">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+      </button>
+    </div>
+  </div>
 </div>
 
 <div class="sheet" id="drawer"><div class="panel">
@@ -124,7 +169,9 @@ var archived = {}
 var modelCatalog = null
 var curModel = null
 var running = false
+var queueItems = []
 var counter = 0
+var statusTimer = null
 
 function el(tag, cls, text) {
   var d = document.createElement(tag)
@@ -141,7 +188,8 @@ function addRow(key, cls) {
   rows.set(key, r)
   return r
 }
-function autoGrow() { var t = $('txt'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 120) + 'px' }
+function autoGrow() { var t = $('txt'); t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 132) + 'px' }
+function oneLine(s, n) { s = String(s || '').replace(/\\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n) + '…' : s }
 
 async function api(endpoint, payload) {
   var res = await fetch('/mobile/api/' + endpoint, {
@@ -152,7 +200,7 @@ async function api(endpoint, payload) {
   return res.json()
 }
 
-// ── 渲染（DOM，不用 innerHTML） ─────────────────────────────
+// ── 渲染（DOM，不用 innerHTML 注入） ────────────────────────
 function textOfContent(content) {
   if (!Array.isArray(content)) return ''
   var out = []
@@ -171,18 +219,13 @@ function thinkBlock(text, open) {
   d.appendChild(el('pre', null, text || ''))
   return d
 }
-function brief(args) {
-  if (typeof args !== 'string' || !args) return ''
-  var one = args.replace(/\\s+/g, ' ')
-  return one.length > 60 ? one.slice(0, 60) + '…' : one
-}
 function pretty(args) {
   if (typeof args !== 'string') return ''
   try { return JSON.stringify(JSON.parse(args), null, 2) } catch (e) { return args }
 }
 function toolCard(name, args, callId) {
   var d = el('details', 'tool')
-  d.appendChild(el('summary', null, (name || 'tool') + '  ' + brief(args)))
+  d.appendChild(el('summary', null, (name || 'tool') + '  ' + oneLine(args, 52)))
   d.appendChild(el('pre', null, pretty(args)))
   if (callId) cards.set(callId, d)
   return d
@@ -234,19 +277,42 @@ function renderEvent(ev, key) {
     }
     return
   }
-  var label = t
-  if (t === 'session/title' && d.title) label = '标题：' + d.title
+  if (t === 'session/title' && d.title) { return }   // 标题只在 header 显示，不占消息流
   var r5 = addRow(key, 'sysline')
-  r5.appendChild(el('div', null, label))
+  r5.appendChild(el('div', null, t))
 }
 
 // ── SSE ─────────────────────────────────────────────────────
 function setRunning(on) {
   running = on
-  $('conn').className = 'dot' + (on ? ' on' : '')
-  $('cancel').style.display = on ? 'block' : 'none'
-  $('send').style.display = on ? 'none' : 'block'
+  $('stop').style.display = on ? 'flex' : 'none'
+  paintQueue()
 }
+function paintQueue() {
+  var q = $('queue'), t = $('queueTxt'), list = $('queueList')
+  var n = queueItems.length
+  if (!running && n === 0) { q.style.display = 'none'; list.style.display = 'none'; return }
+  q.style.display = 'flex'
+  q.className = running ? 'run' : ''
+  var parts = []
+  if (running) parts.push('正在执行')
+  if (n > 0) parts.push('排队 ' + n + ' 条')
+  t.textContent = parts.join(' · ') || '空闲'
+  $('curSub').textContent = parts.join(' · ') || (cur ? '空闲' : '连接中…')
+  if (n > 0) {
+    list.innerHTML = ''
+    queueItems.forEach(function (s) {
+      list.appendChild(el('div', 'qi', oneLine(s, 160)))
+    })
+  } else { list.style.display = 'none' }
+}
+$('queueToggle').onclick = function () {
+  var list = $('queueList')
+  var open = list.style.display === 'block'
+  list.style.display = open ? 'none' : 'block'
+  $('queueToggle').textContent = open ? '查看' : '收起'
+}
+
 function closeStream() { if (es) { es.close(); es = null } setRunning(false) }
 function clearLog() { rows.forEach(function (r) { r.remove() }); rows = new Map(); cards = new Map(); live = { text: '', think: '', tRow: null, kRow: null } }
 
@@ -262,6 +328,7 @@ function follow(sid) {
     if (es) es.close()
     if (cur) setTimeout(function () { if (cur && cur.sessionId === sid) follow(sid) }, 2500)
   }
+  startStatusPolling(sid)
 }
 
 function str(v) {
@@ -276,9 +343,8 @@ function onFrame(f) {
     var title = str(vals.title)
     if (title && cur) { cur.title = title; $('curTitle').textContent = title }
     var ms = vals.modelSelection || {}
-    curModel = ms.next || ms.lastUsed || null
+    curModel = ms.next || ms.lastUsed || curModel
     paintModelBtn()
-    setRunning(!!vals.running)
     var recs = f.records || []
     for (var i = 0; i < recs.length; i++) onRecord(recs[i])
     scrollDown()
@@ -329,11 +395,28 @@ function onLive(fr) {
   if (fr.type === 'end') {
     if (live.kRow) { var d = live.kRow.querySelector('details'); if (d) d.open = false }
     live = { text: '', think: '', tRow: null, kRow: null }
-    setRunning(false)
   }
 }
 
-// ── 工作区 / 会话 ───────────────────────────────────────────
+// ── 会话状态轮询（running / 队列 / 模型 与 DSH 同步） ───────
+function startStatusPolling(sid) {
+  if (statusTimer) clearInterval(statusTimer)
+  var tick = async function () {
+    if (!cur || cur.sessionId !== sid) return
+    try {
+      var r = await api('status', { sid: sid })
+      var v = r.value || {}
+      if (v.title && (!cur.title || cur.title !== v.title)) { cur.title = v.title; $('curTitle').textContent = v.title }
+      if (v.modelSelection) { curModel = v.modelSelection; paintModelBtn() }
+      queueItems = (v.queue && (v.queue.nextTurn || []).concat(v.queue.nextStep || [])) || []
+      setRunning(!!v.running)
+    } catch (e) { /* 忽略单次失败 */ }
+  }
+  tick()
+  statusTimer = setInterval(tick, 3000)
+}
+
+// ── 工作区 / 会话（只列工作区内的会话，与 DSH 侧栏同源） ────
 async function loadSidebar() {
   var box = $('sessList')
   box.textContent = '加载中…'
@@ -356,12 +439,13 @@ function paintSidebar(box) {
   var byId = {}
   sessions.forEach(function (s) { byId[s.sessionId] = s })
   var used = {}
-  var total = 0
+  var shown = 0
 
   function sessRow(s) {
-    if (!s || archived[s.sessionId]) return null
+    // 已归档 / 子代理会话不显示（与 DSH 侧栏一致）
+    if (!s || archived[s.sessionId] || s.origin === 'subagent') return null
     used[s.sessionId] = true
-    total++
+    shown++
     var d = el('div', 'sess' + (cur && cur.sessionId === s.sessionId ? ' active' : ''))
     d.appendChild(el('div', 't', s.title || s.sessionId.slice(0, 16)))
     if (s.running) d.appendChild(el('span', 'st run', '运行中'))
@@ -378,39 +462,42 @@ function paintSidebar(box) {
     group.appendChild(head)
     var any = false
     ;(ws.sessionIds || []).forEach(function (id) { var r = sessRow(byId[id]); if (r) { group.appendChild(r); any = true } })
-    sessions.forEach(function (s) {
-      if (used[s.sessionId] || archived[s.sessionId]) return
-      if (s.cwd && ws.path && s.cwd === ws.path) { var r = sessRow(s); if (r) { group.appendChild(r); any = true } }
-    })
     if (!any) group.appendChild(el('div', 'sysline', '（无会话）'))
     box.appendChild(group)
   })
 
-  var others = sessions.filter(function (s) { return !used[s.sessionId] && !archived[s.sessionId] })
+  // 其余会话（无工作区归属的杂项）默认折叠，不干扰阅读
+  var others = sessions.filter(function (s) {
+    return !used[s.sessionId] && !archived[s.sessionId] && s.origin !== 'subagent'
+  })
   if (others.length) {
-    var g2 = el('div', 'ws')
-    g2.appendChild(el('div', 'name', '未归类'))
-    others.forEach(function (s) { var r = sessRow(s); if (r) g2.appendChild(r) })
-    box.appendChild(g2)
+    var det = el('details', 'others')
+    det.appendChild(el('summary', null, '其他会话（' + others.length + '）'))
+    others.forEach(function (s) { var r = sessRow(s); if (r) det.appendChild(r) })
+    box.appendChild(det)
   }
-  var hidden = sessions.filter(function (s) { return archived[s.sessionId] }).length
-  if (hidden) box.appendChild(el('div', 'sysline', '已隐藏 ' + hidden + ' 条已归档会话（与 DSH 归档一致）'))
-  if (total === 0) box.appendChild(el('div', 'sysline', '没有可见会话（已归档的不显示）'))
+  var hiddenArch = sessions.filter(function (s) { return archived[s.sessionId] }).length
+  var hiddenSub = sessions.filter(function (s) { return s.origin === 'subagent' && !archived[s.sessionId] }).length
+  box.appendChild(el('div', 'sysline',
+    '共 ' + shown + ' 条可见 · 已隐藏 ' + hiddenArch + ' 条归档 / ' + hiddenSub + ' 条子代理'))
 }
 
 // ── 模型 ────────────────────────────────────────────────────
 function paintModelBtn() {
-  var btn = $('modelBtn')
   var name = ''
-  if (curModel && modelCatalog) {
+  var sel = curModel
+  // 有些会话的列表投影不含 modelSelection：回退到 DSH 的默认模型（就是实际会用的那个）
+  if (!sel && modelCatalog && modelCatalog.default && modelCatalog.default.provider) sel = modelCatalog.default
+  if (sel && modelCatalog) {
     (modelCatalog.groups || []).forEach(function (g) {
-      if (g.id !== curModel.provider) return
-      ;(g.models || []).forEach(function (m) { if (m.id === curModel.model) name = m.name || m.id })
+      if (g.id !== sel.provider) return
+      ;(g.models || []).forEach(function (m) { if (m.id === sel.model) name = m.name || m.id })
     })
   }
-  if (!name && curModel) name = curModel.model
-  btn.textContent = name || '模型'
-  btn.title = curModel ? (curModel.provider + ' / ' + curModel.model + (curModel.reasoningEffort ? ' / ' + curModel.reasoningEffort : '')) : '选择模型'
+  if (!name && sel) name = sel.model
+  var label = $('modelBtn').querySelector('.mn')
+  if (label) label.textContent = name || '模型'
+  $('modelBtn').title = sel ? (sel.provider + ' / ' + sel.model + (sel.reasoningEffort ? ' / ' + sel.reasoningEffort : '')) : '选择模型'
 }
 
 async function loadModels() {
@@ -446,7 +533,7 @@ function paintModels(box) {
         var er = el('div', 'efforts')
         efforts.forEach(function (ef) {
           var curEff = !!(curModel && curModel.reasoningEffort === ef.id)
-          var b = el('button' + (curEff ? '' : ''), curEff ? 'cur' : null, ef.name || ef.id)
+          var b = el('button', curEff ? 'cur' : null, ef.name || ef.id)
           b.onclick = function () { selectModel(g.id, m.id, ef.id) }
           er.appendChild(b)
         })
@@ -497,18 +584,22 @@ function sendText() {
     sid: cur.sessionId, text: t,
     mode: running ? 'queue' : 'steer',
     clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
-  }).then(function () { setRunning(true) })
-    .catch(function (e) {
-      var rr = addRow('err-' + (++counter), 'sysline')
-      rr.appendChild(el('div', null, '发送失败：' + (e && e.message ? e.message : e)))
-    })
+  }).then(function () {
+    setRunning(true)
+    // 排队时立即在状态条上体现
+    if (running) { queueItems.push(t); paintQueue() }
+    setTimeout(function () { if (cur) startStatusPolling(cur.sessionId) }, 400)
+  }).catch(function (e) {
+    var rr = addRow('err-' + (++counter), 'sysline')
+    rr.appendChild(el('div', null, '发送失败：' + (e && e.message ? e.message : e)))
+  })
 }
 $('send').onclick = sendText
-$('cancel').onclick = function () { if (cur) api('cancel', { sid: cur.sessionId }).catch(function () { }) }
+$('stop').onclick = function () { if (cur) api('cancel', { sid: cur.sessionId }).catch(function () { }) }
 $('txt').addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText() } })
 $('txt').addEventListener('input', autoGrow)
 
-// 初始：自动打开最近一个**未被归档**的可见会话（归档集合与 DSH 同源）
+// 初始：自动打开最近一个未归档、非子代理的会话
 ;(async function boot() {
   try {
     var sres = await api('sessions', {})
@@ -519,13 +610,19 @@ $('txt').addEventListener('input', autoGrow)
     ;(w.archivedSessionIds || []).forEach(function (id) { archived[id] = true })
     sessions = items
     wsItems = w.items || []
+    var inWs = {}
+    wsItems.forEach(function (ws) { (ws.sessionIds || []).forEach(function (id) { inWs[id] = true }) })
     var first = null
-    for (var i = 0; i < items.length; i++) { if (!archived[items[i].sessionId]) { first = items[i]; break } }
-    if (first) openSession(first)
-    else {
-      var r = addRow('boot', 'sysline')
-      r.appendChild(el('div', null, '没有可见会话（已归档的不显示）：点 ☰ 选择工作区'))
+    for (var i = 0; i < items.length; i++) {
+      var s = items[i]
+      if (!archived[s.sessionId] && s.origin !== 'subagent' && inWs[s.sessionId]) { first = s; break }
     }
+    if (!first) for (var j = 0; j < items.length; j++) {
+      var s2 = items[j]
+      if (!archived[s2.sessionId] && s2.origin !== 'subagent') { first = s2; break }
+    }
+    if (first) openSession(first)
+    else { var r = addRow('boot', 'sysline'); r.appendChild(el('div', null, '没有可见会话：点 ☰ 选择工作区')) }
   } catch (e) { /* 未登录时 api() 已跳转 */ }
 })()
 </script></body></html>`

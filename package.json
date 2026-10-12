@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-mobile-remote",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "手机端远程操控 DSH：移动端 UI 面板 + SSE 会话流 + 扫码配对（局域网/云隧道跨网直连）",
   "private": true,
   "type": "module",
@@ -67,6 +67,7 @@
     }
   }
 }
+
 
 
 

@@ -309,7 +309,7 @@ async function authed(){
         return
       }
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair', 'workspaces', 'models', 'selectModel'] }))
+      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair', 'workspaces', 'models', 'selectModel', 'status'] }))
       return
     }
     if (req.method !== 'POST') { res.writeHead(405).end(); return }
@@ -342,6 +342,35 @@ async function authed(){
         }
         case 'models': {
           value = await ctx.sessionController.modelCatalog()
+          break
+        }
+        case 'status': {
+          // 轻量会话状态：运行中？排队几条？当前模型？标题？
+          // （running/inbox 只在会话摘要里，follow 快照不含 running —— 实测踩坑）
+          const sid = String(body.sid)
+          const list = await ctx.sessionController.list({}, new AbortController().signal)
+          const row = list.items.find(i => String(i.sessionId) === sid)
+          const vals = (row?.projections?.values ?? {}) as Record<string, unknown>
+          const inbox = (vals.inbox ?? {}) as Record<string, unknown>
+          const texts = (arr: unknown): string[] => {
+            if (!Array.isArray(arr)) return []
+            return arr.map((m: any) => {
+              const c = m?.content
+              if (Array.isArray(c)) return c.map((b: any) => (typeof b?.text === 'string' ? b.text : '')).join(' ').trim()
+              return ''
+            }).filter(Boolean)
+          }
+          value = {
+            exists: !!row,
+            running: !!row?.running,
+            blank: !!row?.blank,
+            title: row ? readProjectionTitle(row) : '',
+            modelSelection: vals.modelSelection ?? null,
+            queue: {
+              nextTurn: texts(inbox['next-turn']),
+              nextStep: texts(inbox['next-step']),
+            },
+          }
           break
         }
         case 'selectModel': {
