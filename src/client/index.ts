@@ -52,7 +52,7 @@ export function qrSvg(text: string, cellSize = 4, margin = 3): string {
   }
 }
 
-type TunnelInfo = { status?: string; url?: string; pairCode?: string; lastError?: string }
+type TunnelInfo = { status?: string; url?: string; pendingUrl?: string; registered?: boolean; pairCode?: string; lastError?: string }
 type PairValue = { port: string; urls: { ip: string; url: string }[]; tunnel?: TunnelInfo }
 
 /** 拉取 host 侧配对信息（含隧道状态/地址/配对码）。 */
@@ -154,7 +154,9 @@ function MobileConsole(): unknown {
         h('span', { style: S.pill(ready) }, tunnel?.status ?? (loading ? '加载中' : '未启用'))),
       h('div', { style: S.dim }, ready
         ? '任何网络都能扫（无需装 App、无需同局域网）。地址随 DeepSeek Harness 进程生灭：关掉 Harness 后重新扫码即可。'
-        : '隧道建立中；首次会下载 cloudflared（约 53MB，经官方 SHA256 校验后才采用）。'),
+        : (tunnel?.pendingUrl
+          ? `地址已分配（${tunnel.pendingUrl}），等 Cloudflare 确认注册中（约 20 秒）——注册完成前扫码会 530，请稍等再扫。`
+          : '隧道建立中；首次会下载 cloudflared（约 53MB，经官方 SHA256 校验后才采用）。')),
       ready ? h('div', { style: { marginTop: 6 } }, h('code', { style: S.code }, tunnel!.url!)) : null,
       ready ? h('div', { style: { marginTop: 6 } },
         '配对码：', h('b', { style: { fontSize: 18, letterSpacing: 3 } }, tunnel!.pairCode ?? '—'),

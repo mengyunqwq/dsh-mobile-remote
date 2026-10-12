@@ -26,6 +26,8 @@ export class CloudflareTunnel {
   private intendedStop = false
   /** 最近一次失败的可读原因（pair/health 直接可见）。 */
   lastError = ''
+  /** 云端是否已确认注册（域名出现 ≠ 可用：注册前访问会 530）。 */
+  private registered = false
 
   constructor(private readonly dataDir: string) {
     mkdirSync(dataDir, { recursive: true })
@@ -36,7 +38,17 @@ export class CloudflareTunnel {
   }
 
   get publicUrl(): string {
-    return this.state === 'ready' ? this.url : ''
+    // 只有"云端已注册"才对外给地址：域名刚出现时访问会 530（实测 21s 窗口）
+    return this.state === 'ready' && this.registered ? this.url : ''
+  }
+
+  /** 已发现但尚未注册的地址（给面板显示"注册中"用，不建议直接扫码）。 */
+  get pendingUrl(): string {
+    return this.url
+  }
+
+  get isRegistered(): boolean {
+    return this.registered
   }
 
   tail(): string[] {
@@ -75,21 +87,23 @@ export class CloudflareTunnel {
       return { url: '', state: this.state }
     }
     this.launch()
-    // 最多等 45s 拿到 URL
+    // 最多等 60s 到"云端已注册"（域名出现后还要 ~20s 才注册，之前会 530）
     const url = await new Promise<string>(resolve => {
       const started = Date.now()
       const timer = setInterval(() => {
-        if (this.url) { clearInterval(timer); resolve(this.url); return }
-        if (this.state === 'failed' || Date.now() - started > 45_000) { clearInterval(timer); resolve('') }
+        if (this.url && this.registered) { clearInterval(timer); resolve(this.url); return }
+        if (this.state === 'failed' || Date.now() - started > 60_000) { clearInterval(timer); resolve('') }
       }, 500)
     })
-    if (this.url && this.state === 'starting') this.state = 'ready'
-    if (!this.url && !this.proc) {
+    if (url && this.state === 'starting') this.state = 'ready'
+    if (!url && !this.proc) {
       // 进程已死且没有 URL：把可读原因补上（进程失败路径已在 exit/error 里记录）
       if (!this.lastError) this.lastError = 'cloudflared 进程未能启动或立即退出'
       this.log('ensure gave up without url (state=' + this.state + ')')
     }
-    this.log(this.url ? `tunnel ready: ${this.url}` : `tunnel not ready yet (state=${this.state}${this.lastError ? ', err=' + this.lastError : ''})`)
+    this.log(url
+      ? `tunnel ready: ${this.url}`
+      : `tunnel not ready yet (state=${this.state}, url=${this.url || '-'}, registered=${this.registered}${this.lastError ? ', err=' + this.lastError : ''})`)
     return { url: this.publicUrl, state: this.state }
   }
 
@@ -115,6 +129,7 @@ export class CloudflareTunnel {
 
   private launch(): void {
     this.url = ''
+    this.registered = false
     this.intendedStop = false
     if (this.proc) return
     // Host 统一改写到隔离 authority（dsh-tunnel:3080）：
@@ -132,15 +147,22 @@ export class CloudflareTunnel {
       for (const line of buf.split(/\r?\n/)) {
         if (!line.trim()) continue
         if (line.length > 300) continue
+        // ① 云端确认注册 → 才算真的可用（此前访问会 530）
+        if (/Registered tunnel connection/i.test(line)) {
+          this.registered = true
+          if (this.state === 'starting') this.state = 'ready'
+          this.log('tunnel registered (可用): ' + this.url)
+          continue
+        }
         const m = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i.exec(line)
         if (m) {
           this.url = m[0]
-          if (this.state === 'starting') this.state = 'ready'
-          this.log('tunnel url discovered: ' + this.url)
-          return
+          // 只发现域名还不够：保持 starting，等 Registered tunnel connection
+          this.log('tunnel url discovered (等待注册): ' + this.url)
+          continue
         }
         // 只记录非噪音行
-        if (/error|fail|retry|failover|registered|connect|serv/i.test(line)) {
+        if (/error|fail|retry|failover|connect|serv/i.test(line)) {
           this.log(line.slice(0, 200))
           if (/failed|退出|exit/i.test(line) && !this.url) this.state = 'failed'
         }

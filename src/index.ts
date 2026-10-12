@@ -124,14 +124,21 @@ ${codeGiven ? '<p style="color:#b91c1c">配对码不正确。</p>' : ''}
         return true
       }
       // 公网拿到正确配对码 / 局域网访客：一步自动兑换登录
+      // ⚠️ 关键坑（2026-10-12 实测）：不能用 req.headers.host 拼登录链接！
+      //    云隧道下 cloudflared 会把 Host 改写成内部 authority（dsh-tunnel:3080），
+      //    手机拿去解析这个域名必然 DNS 失败 → "扫码连不上"。
+      //    正确做法：只下发 token，让页面用 **自己的 location.origin** 拼（LAN/隧道/反代都成立）。
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' })
-      const loginUrl = ctx.connection.authenticatedUrl(origin)
+      const tokenized = ctx.connection.authenticatedUrl('http://placeholder.invalid/')
+      const token = new URL(tokenized).searchParams.get('token') ?? ''
       res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <body style="font-family:system-ui;padding:2rem;max-width:30em;margin:auto">
 <h2>🔐 正在连接…</h2><p id="st" style="color:#889">正在完成配对（通常 1 秒内）</p>
-<p style="font-size:13px;color:#aaa">若 10 秒仍未进入，<a href="${loginUrl}" style="color:#4c8dff">点此手动登录</a>后回到本页。</p>
+<p style="font-size:13px;color:#aaa">若 10 秒仍未进入，<a id="manual" href="#" style="color:#4c8dff">点此手动登录</a>后回到本页。</p>
 <script>
-var LOGIN_URL = ${JSON.stringify(loginUrl)};
+var TOKEN = ${JSON.stringify(token)};
+var LOGIN_URL = location.origin + '/?token=' + encodeURIComponent(TOKEN);
+document.getElementById('manual').href = LOGIN_URL;
 function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms) }) }
 async function authed(){
   try { var r = await fetch('/mobile/api/ping', { method:'POST', credentials:'same-origin' }); return r.ok } catch(e){ return false }
@@ -298,6 +305,9 @@ async function authed(){
             tunnel: {
               status: tunnel.status,
               url: tunnelUrl,
+              // 已发现但还没被云端确认注册的地址（面板显示"注册中"，此时扫码会 530）
+              pendingUrl: tunnel.pendingUrl,
+              registered: tunnel.isRegistered,
               lastError: tunnel.lastError || '',
               logTail: tunnel.tail(),
               // 公网配对码（设置页展示；二维码里的直连地址在多数相机场景预填，输入码兜底）
