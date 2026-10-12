@@ -1,28 +1,35 @@
 /**
- * @dsh-external/dsh-mobile-remote — client 侧。
- *  1. conversation.view slot：对话视图里的入口卡片（面板地址说明）。
- *  2. plugins.bundle.config slot（keyed = 包名）：本插件在「插件设置」页的
- *     配置面板 —— 扫码配对二维码 + 各网卡候选地址 + 安全提示。
- * 手机扫到的地址打开 /mobile，由引导页自动完成登录配对（token → 签名 cookie）。
- * ⚠️ 必坑（实测）：inject = ['slots']；register 必须带 name；keyed slot 必须 key。
+ * @dsh-external/dsh-mobile-remote — client 侧（DSH GUI 内的三个界面）。
+ *
+ *  1. 「手机遥控」独立主面板：sidebar.panellist 图标 + main 面板（keyed='mobile-remote'）
+ *     —— 二维码扫码配对、隧道状态、本机地址、以及内嵌 /mobile 的实时预览（手机界面映射）。
+ *  2. plugins.bundle.config：插件设置页里的扫码配对卡（keyed=包名）。
+ *  3. conversation.view：对话视图入口卡。
+ *
+ * ⚠️ 关键坑（2026-10-12 实测）：DSH 渲染器把 entry.component **直接当 React 组件**用
+ *    （`jsx(Comp, {...props})`）。脚手架生成的 `component: () => ({ render() {} })`
+ *    不是 React 组件 → 渲染时抛错，被 slot 错误边界静默吞掉（界面一片空白）。
+ *    所以这里全部写成真正的 React 函数组件。
+ * ⚠️ 另一个坑：register 必须带 name（slot 名）；keyed slot 必须带 key；
+ *    侧边栏图标 id 必须与主面板 key 一致。
  */
+import React from 'react'
 import qrcode from 'qrcode-generator'
 
-type SlotsLike = {
-  inject(slot: string, factory: unknown, tag?: string): void
-  register(def: unknown): unknown
-}
-
-type ClientContext = {
-  slots: SlotsLike
-  effect(fn: () => unknown, tag?: string): void
-}
-
-export const inject = ['slots']
+const h = React.createElement
 
 const PLUGIN_ID = '@dsh-external/dsh-mobile-remote'
+/** 侧边栏图标与主面板共用的 id（sidebar.panellist.id === main.key）。 */
+const PANEL_ID = 'mobile-remote'
 
-/** text → dataURL（ECC L，typeNumber 0 自动）；失败返回空串。 */
+export const inject = ['slots', 'layout']
+
+/** apply 时注入的面板导航能力（供设置页「打开面板」按钮使用）。 */
+let layoutRef: { selectPanel?: (id: string) => void } | null = null
+
+// ── 工具 ─────────────────────────────────────────────────────────────
+
+/** text → PNG dataURL（ECC L，自动版本）；失败返回空串。 */
 function qrDataUrl(text: string): string {
   try {
     const qr = (qrcode as unknown as (n: number, ecl: string) => {
@@ -56,152 +63,222 @@ function qrDataUrl(text: string): string {
   }
 }
 
-type PairValue = { urls: { ip: string; url: string }[]; port: string; tunnel?: { status: string; url: string; pairCode?: string } }
+type TunnelInfo = { status?: string; url?: string; pairCode?: string; lastError?: string }
+type PairValue = { port: string; urls: { ip: string; url: string }[]; tunnel?: TunnelInfo }
 
-async function fetchPair(): Promise<PairValue | null> {
+/** 拉取 host 侧配对信息（含隧道状态/地址/配对码）。 */
+function usePair(): { data: PairValue | null; error: string; loading: boolean; reload: () => void } {
+  const [state, setState] = React.useState({ data: null as PairValue | null, error: '', loading: true })
+  const load = React.useCallback(() => {
+    setState((s: { data: PairValue | null; error: string; loading: boolean }) => ({ ...s, loading: true }))
+    fetch('/mobile/api/pair')
+      .then(r => r.json())
+      .then((b: { ok?: boolean; value?: PairValue }) => {
+        if (b && b.ok && b.value) setState({ data: b.value, error: '', loading: false })
+        else setState({ data: null, error: '尚未授权（刷新页面后重试）', loading: false })
+      })
+      .catch((e: unknown) => setState({ data: null, error: String(e), loading: false }))
+  }, [])
+  React.useEffect(() => { load() }, [load])
+  // 隧道还在 starting 时每 4s 自动刷新
+  React.useEffect(() => {
+    const t = setInterval(() => {
+      const st = state.data?.tunnel?.status
+      if (!state.data || st === 'starting' || st === 'disabled') load()
+    }, 4000)
+    return () => clearInterval(t)
+  }, [state.data, load])
+  return { ...state, reload: load }
+}
+
+function copy(text: string, onDone?: () => void): void {
   try {
-    const res = await fetch('/mobile/api/pair', { method: 'GET' })
-    const body = await res.json()
-    if (body?.ok && Array.isArray(body.value?.urls)) return body.value
-  } catch { /* 尚未认证等 */ }
-  return null
+    void navigator.clipboard?.writeText(text).then(() => onDone?.())
+  } catch { /* ignore */ }
 }
 
-const STYLE = `
-.mr-set{font:13px/1.6 system-ui,sans-serif;max-width:560px}
-.mr-set .row{display:flex;gap:14px;align-items:flex-start;margin:12px 0}
-.mr-set img{border-radius:8px;background:#fff;padding:6px}
-.mr-set code{background:rgba(127,143,170,.14);padding:2px 6px;border-radius:6px;font-size:12px;word-break:break-all}
-.mr-set .dim{opacity:.7}
-.mr-set .warn{color:#e6a23c}
-.mr-set button{cursor:pointer;border-radius:8px;border:1px solid rgba(127,143,170,.4);background:transparent;color:inherit;padding:4px 10px}
-.mr-set .item{margin:10px 0;padding:9px 11px;border:1px solid rgba(127,143,170,.25);border-radius:10px}
-`
+// ── 样式 ─────────────────────────────────────────────────────────────
 
-/** 设置页正文：向 host 取候选地址 → 每个候选一张二维码 + 复制按钮。 */
-function buildPanel(): HTMLDivElement {
-  const root = document.createElement('div')
-  root.className = 'mr-set'
-  root.innerHTML = `<style>${STYLE}</style>
-    <h4 style="margin:0 0 2px">📱 手机遥控 · 扫码连接</h4>
-    <div class="dim">手机用相机扫任意一个二维码即可打开面板；首次访问出现「手机端登录」引导页，在里面点一下即自动完成配对。</div>
-    <div id="mr-list">正在获取本机地址…</div>
-    <div class="warn" style="margin-top:8px">
-      局域网二维码：手机须与电脑同一网络；若手机提示 403 或打不开，需把 webserver 监听改为
-      <code>0.0.0.0</code> 并把本机 IP 加入 client-connection 的 <code>trustedHosts</code>（README 有完整说明）。
-      <b>不装任何 App、跨网也能连：用下面的 ☁️ 云隧道二维码</b>（走公网 HTTPS，受本机登录认证保护）。
-    </div>
-    <div class="dim" style="margin-top:6px">云隧道地址随 DeepSeek Harness 进程生灭：Harness 关闭后隧道失效，重启后重新扫码即可。</div>`
-  const list = root.querySelector('#mr-list') as HTMLDivElement
-  void (async () => {
-    const pair = await fetchPair()
-    list.innerHTML = ''
-    if (!pair) {
-      list.innerHTML = '<div class="warn">获取本机地址失败（稍后重试，或查看 README 的局域网配置）。</div>'
-      return
-    }
-    const candidates = pair.urls?.length ? pair.urls : []
-    for (const c of candidates) {
-      const item = document.createElement('div')
-      item.className = 'item'
-      const data = qrDataUrl(c.url)
-      item.style.display = 'flex'
-      item.style.gap = '14px'
-      item.innerHTML = `
-        <img src="${data}" width="132" height="132" alt="二维码" ${data ? '' : 'hidden'}>
-        <div style="flex:1;min-width:0">
-          <div><b>局域网 · ${c.ip}</b></div>
-          <code>${c.url}</code>
-          <div style="margin-top:6px"><button type="button">复制地址</button></div>
-        </div>`
-      const btn = item.querySelector('button') as HTMLButtonElement
-      btn.onclick = () => {
-        navigator.clipboard?.writeText(c.url).then(() => {
-          btn.textContent = '已复制 ✓'
-          setTimeout(() => { btn.textContent = '复制地址' }, 1500)
-        })
-      }
-      list.appendChild(item)
-    }
-    if (!candidates.length) {
-      const nodata = document.createElement('div')
-      nodata.className = 'warn'
-      nodata.textContent = '未发现局域网网卡地址（用下方 ☁️ 云隧道跨网连接）'
-      list.appendChild(nodata)
-    }
-    // 云隧道（跨网）：手机无需同局域网、无需装任何 App
-    const t = pair.tunnel
-    const tItem = document.createElement('div')
-    tItem.className = 'item'
-    if (t && t.url) {
-      tItem.style.display = 'flex'
-      tItem.style.gap = '14px'
-      const tdata = qrDataUrl(t.pairCode ? `${t.url}?pair=${t.pairCode}` : t.url)
-      tItem.innerHTML = `
-        <img src="${tdata}" width="132" height="132" alt="二维码" ${tdata ? '' : 'hidden'}>
-        <div style="flex:1;min-width:0">
-          <div><b>☁️ 云隧道 · 跨网可用</b></div>
-          <div class="dim">HTTPS 加密直达，任何网络都能扫；走 Cloudflare 公网但受配对码保护。地址随 Harness 进程生灭。</div>
-          <code>${t.url}</code>
-          <div style="margin-top:6px">配对码（手机提示输入时手用）：<b style="font-size:18px;letter-spacing:3px">${t.pairCode ?? '—'}</b></div>
-          <div style="margin-top:4px"><button type="button">复制地址</button></div>
-        </div>`
-      const tbtn = tItem.querySelector('button') as HTMLButtonElement
-      tbtn.onclick = () => {
-        navigator.clipboard?.writeText(t.url).then(() => {
-          tbtn.textContent = '已复制 ✓'
-          setTimeout(() => { tbtn.textContent = '复制地址' }, 1500)
-        })
-      }
-    } else {
-      tItem.innerHTML = `<div><b>☁️ 云隧道</b></div><div class="dim">状态：${t?.status ?? 'starting'}（隧道建立中，稍后刷新设置页；若持续未就绪可在插件配置里关掉 tunnel 再排障）</div>`
-    }
-    list.appendChild(tItem)
-  })()
-  return root
+const S = {
+  wrap: { padding: '18px 20px', font: '13px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif', overflowY: 'auto', height: '100%', boxSizing: 'border-box' } as const,
+  h1: { fontSize: '17px', fontWeight: 700, margin: '0 0 2px' } as const,
+  dim: { opacity: 0.68 } as const,
+  row: { display: 'flex', gap: '14px', alignItems: 'flex-start', marginTop: '14px', flexWrap: 'wrap' } as const,
+  card: { border: '1px solid rgba(127,143,170,.28)', borderRadius: '12px', padding: '12px 14px', minWidth: '260px', flex: '1 1 300px', boxSizing: 'border-box' } as const,
+  code: { background: 'rgba(127,143,170,.14)', padding: '2px 6px', borderRadius: '6px', fontSize: '12px', wordBreak: 'break-all' } as const,
+  pill: (ok: boolean) => ({ display: 'inline-block', fontSize: '11px', padding: '2px 8px', borderRadius: '999px', background: ok ? 'rgba(52,211,153,.18)' : 'rgba(248,113,113,.18)', color: ok ? '#34d399' : '#f87171', marginLeft: '6px' }) as const,
+  btn: { cursor: 'pointer', border: '1px solid rgba(127,143,170,.4)', background: 'transparent', color: 'inherit', borderRadius: '8px', padding: '5px 11px', marginRight: '6px', font: 'inherit' } as const,
+  warn: { color: '#e6a23c', marginTop: '10px' } as const,
 }
 
-export function apply(ctx: ClientContext): void {
-  // 1) 对话视图入口卡
-  ctx.effect(() => ctx.slots.inject('conversation.view', () =>
-    ctx.slots.register({
-      name: 'conversation.view',
-      id: `${PLUGIN_ID}-panel`,
-      label: () => '手机遥控入口',
-      component: () => ({
-        render(props?: { view?: string }) {
-          const el = document.createElement('div')
-          if (props?.view === 'summary') {
-            el.textContent = '手机遥控入口'
-            return el
-          }
-          el.style.cssText = 'padding:14px;font:13px/1.7 system-ui,sans-serif'
-          const here = new URL(location.href)
-          el.innerHTML = `📱 手机远程操控：手机浏览器打开 <b>${here.origin}/mobile</b>。
-            扫码配对二维码已放在 <b>插件设置 → 本插件页</b>（plugins.bundle.config）。`
-          return el
-        },
-      }),
-    }),
-  ), `${PLUGIN_ID}: entry panel`)
+function Qr({ text, size = 132 }: { text: string; size?: number }): unknown {
+  const [src, setSrc] = React.useState('')
+  React.useEffect(() => { setSrc(qrDataUrl(text)) }, [text])
+  if (!src) return h('div', { style: { width: size, height: size, background: 'rgba(127,143,170,.15)', borderRadius: 8, flex: 'none' } })
+  return h('img', { src, width: size, height: size, alt: '二维码', style: { borderRadius: 8, background: '#fff', padding: 6, flex: 'none' } })
+}
 
-  // 2) 插件设置页：二维码扫码配对（keyed by 包名）
-  ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () =>
-    ctx.slots.register({
-      name: 'plugins.bundle.config',
-      key: PLUGIN_ID,
-      label: () => '手机遥控（扫码连接）',
-      component: () => ({
-        render(props?: { view?: string }) {
-          const wrap = document.createElement('div')
-          if (props?.view === 'summary') {
-            wrap.textContent = '扫码连接手机端'
-            return wrap
-          }
-          wrap.appendChild(buildPanel())
-          return wrap
-        },
-      }),
-    }),
-  ), `${PLUGIN_ID}: settings qr`)
+function CopyButton({ text, label = '复制' }: { text: string; label?: string }): unknown {
+  const [done, setDone] = React.useState(false)
+  return h('button', {
+    type: 'button',
+    style: S.btn,
+    onClick: () => copy(text, () => { setDone(true); setTimeout(() => setDone(false), 1500) }),
+  }, done ? '已复制 ✓' : label)
+}
+
+// ── 1. 独立主面板：手机遥控控制台 ────────────────────────────────────
+
+function MobileConsole(): unknown {
+  const { data, error, loading, reload } = usePair()
+  const [showPreview, setShowPreview] = React.useState(true)
+  const tunnel = data?.tunnel
+  const ready = tunnel?.status === 'ready' && !!tunnel.url
+
+  const lanCards = (data?.urls ?? []).map(u =>
+    h('div', { key: u.ip, style: { ...S.card, display: 'flex', gap: 14 } },
+      h(Qr, { text: u.url, key: 'qr' }),
+      h('div', { key: 'info', style: { minWidth: 0, flex: 1 } },
+        h('div', null, h('b', null, `局域网 · ${u.ip}`)),
+        h('div', { style: S.dim }, '手机与电脑同一 WiFi 时扫这个'),
+        h('div', { style: { marginTop: 6 } }, h('code', { style: S.code }, u.url)),
+        h('div', { style: { marginTop: 6 } }, h(CopyButton, { text: u.url })))))
+
+  const tunnelCard = h('div', { style: { ...S.card, display: 'flex', gap: 14 } },
+    ready ? h(Qr, { key: 'qr', text: tunnel!.pairCode ? `${tunnel!.url}?pair=${tunnel!.pairCode}` : tunnel!.url! }) : null,
+    h('div', { key: 'info', style: { minWidth: 0, flex: 1 } },
+      h('div', null, h('b', null, '☁️ 云隧道 · 跨网可用'),
+        h('span', { style: S.pill(ready) }, tunnel?.status ?? (loading ? '加载中' : '未启用'))),
+      h('div', { style: S.dim }, ready
+        ? '任何网络都能扫（无需装 App、无需同局域网）。地址随 DeepSeek Harness 进程生灭：关掉 Harness 后重新扫码即可。'
+        : '隧道建立中；首次会下载 cloudflared（约 53MB，经官方 SHA256 校验后才采用）。'),
+      ready ? h('div', { style: { marginTop: 6 } }, h('code', { style: S.code }, tunnel!.url!)) : null,
+      ready ? h('div', { style: { marginTop: 6 } },
+        '配对码：', h('b', { style: { fontSize: 18, letterSpacing: 3 } }, tunnel!.pairCode ?? '—'),
+        h('span', { style: { ...S.dim, marginLeft: 6 } }, '（二维码已内嵌配对码；拍不到时手输）')) : null,
+      ready ? h('div', { style: { marginTop: 6 } }, h(CopyButton, {
+        text: tunnel!.pairCode ? `${tunnel!.url}?pair=${tunnel!.pairCode}` : tunnel!.url!,
+        label: '复制连接地址',
+      })) : null,
+      tunnel?.lastError ? h('div', { style: S.warn }, `隧道错误：${tunnel.lastError}`) : null))
+
+  return h('div', { style: S.wrap },
+    h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' } },
+      h('div', { key: 'title' },
+        h('div', { style: S.h1 }, '📱 手机遥控'),
+        h('div', { style: S.dim }, '扫码把手机接到这台电脑的 DeepSeek Harness —— 同一个 agent、同一批会话。')),
+      h('div', { key: 'actions', style: { marginLeft: 'auto' } },
+        h('button', { type: 'button', style: S.btn, onClick: reload }, loading ? '刷新中…' : '刷新'),
+        h('button', {
+          type: 'button', style: S.btn,
+          onClick: () => window.open(data?.urls?.[0]?.url ?? '/mobile', '_blank'),
+        }, '浏览器打开'),
+        h('button', {
+          type: 'button', style: S.btn,
+          onClick: () => setShowPreview((v: boolean) => !v),
+        }, showPreview ? '隐藏手机预览' : '显示手机预览'))),
+
+    error ? h('div', { style: S.warn }, `读取配对信息失败：${error}`) : null,
+    !data && loading ? h('div', { style: { marginTop: 14, ...S.dim } }, '正在读取本机地址与隧道状态…') : null,
+
+    h('div', { style: S.row }, tunnelCard, ...lanCards),
+
+    showPreview ? h('div', { style: { marginTop: 18 } },
+      h('div', { style: { ...S.dim, marginBottom: 6 } }, '手机界面预览（手机打开 /mobile 看到的就是这一屏，可直接在这里点用）：'),
+      h('iframe', {
+        src: '/mobile',
+        title: '手机端界面预览',
+        style: { width: 390, height: 640, border: '1px solid rgba(127,143,170,.3)', borderRadius: 14, background: '#0b0f17' },
+      })) : null)
+}
+
+/** 侧边栏图标（收 {size, active}）。 */
+function MobilePanelIcon({ size = 18 }: { size?: number; active?: boolean }): unknown {
+  return h('svg', {
+    width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
+    stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round',
+  },
+    h('rect', { key: 'body', x: 6, y: 2.5, width: 12, height: 19, rx: 3 }),
+    h('line', { key: 'home', x1: 10.5, y1: 18, x2: 13.5, y2: 18 }))
+}
+
+// ── 2. 插件设置页：扫码配对卡 ────────────────────────────────────────
+
+function SettingsQrPanel(): unknown {
+  const { data, error, loading, reload } = usePair()
+  const tunnel = data?.tunnel
+  const ready = tunnel?.status === 'ready' && !!tunnel.url
+  return h('div', { style: { font: '13px/1.6 system-ui,sans-serif', maxWidth: 620 } },
+    h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+      h('b', { key: 't' }, '📱 扫码连接'),
+      h('button', { key: 'r', type: 'button', style: S.btn, onClick: reload }, loading ? '刷新中…' : '刷新'),
+      h('button', {
+        key: 'o', type: 'button', style: S.btn,
+        onClick: () => layoutRef?.selectPanel?.(PANEL_ID),
+      }, '打开「手机遥控」面板')),
+    h('div', { style: S.dim }, '完整控制台（二维码 + 手机界面预览）在左侧边栏的「手机遥控」面板里。'),
+    error ? h('div', { style: S.warn }, error) : null,
+    ready ? h('div', { style: S.row },
+      h('div', { style: { ...S.card, display: 'flex', gap: 14 } },
+        h(Qr, { key: 'qr', text: tunnel!.pairCode ? `${tunnel!.url}?pair=${tunnel!.pairCode}` : tunnel!.url! }),
+        h('div', { key: 'info' },
+          h('div', null, h('b', null, '☁️ 云隧道（跨网）')),
+          h('code', { style: S.code }, tunnel!.url!),
+          h('div', { style: { marginTop: 6 } }, '配对码 ', h('b', { style: { letterSpacing: 3 } }, tunnel!.pairCode ?? '—'))))) : null,
+    ...(data?.urls ?? []).map(u => h('div', { key: u.ip, style: { ...S.card, display: 'flex', gap: 14, marginTop: 12 } },
+      h(Qr, { key: 'qr', text: u.url, size: 110 }),
+      h('div', { key: 'info' },
+        h('div', null, h('b', null, `局域网 · ${u.ip}`)),
+        h('code', { style: S.code }, u.url),
+        h('div', { style: { marginTop: 6 } }, h(CopyButton, { text: u.url }))))))
+}
+
+// ── 3. 对话视图入口卡 ───────────────────────────────────────────────
+
+function ConversationEntry(): unknown {
+  const here = typeof location !== 'undefined' ? location.origin : ''
+  return h('div', { style: { padding: 14, font: '13px/1.7 system-ui,sans-serif' } },
+    h('div', null, '📱 手机远程操控：手机浏览器打开 ', h('b', null, `${here}/mobile`)),
+    h('div', { style: S.dim }, '二维码 / 手机界面预览在左侧边栏「手机遥控」面板（或插件设置页）。'),
+    h('button', {
+      type: 'button', style: S.btn,
+      onClick: () => layoutRef?.selectPanel?.(PANEL_ID),
+    }, '打开手机遥控面板'))
+}
+
+// ── 注册 ─────────────────────────────────────────────────────────────
+
+export function apply(ctx: {
+  slots: { inject(slot: string, factory: unknown, tag?: string): void; register(def: unknown, comp: unknown): unknown }
+  layout?: { selectPanel?: (id: string) => void }
+  effect(fn: () => unknown, tag?: string): void
+}): void {
+  layoutRef = ctx.layout ?? null
+
+  // 1) 独立主面板 + 侧边栏图标（id 与 main.key 必须一致）
+  ctx.effect(() => ctx.slots.register({
+    name: 'main',
+    key: PANEL_ID,
+  }, MobileConsole), `${PLUGIN_ID}: main panel`)
+
+  ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
+    name: 'sidebar.panellist',
+    id: PANEL_ID,
+    order: 50,
+    label: () => '手机遥控',
+  }, MobilePanelIcon)), `${PLUGIN_ID}: sidebar entry`)
+
+  // 2) 插件设置页扫码卡
+  ctx.effect(() => ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+    name: 'plugins.bundle.config',
+    key: PLUGIN_ID,
+    label: () => '手机遥控（扫码连接）',
+  }, SettingsQrPanel)), `${PLUGIN_ID}: settings qr`)
+
+  // 3) 对话视图入口卡
+  ctx.effect(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
+    name: 'conversation.view',
+    id: `${PLUGIN_ID}-panel`,
+    label: () => '手机遥控入口',
+  }, ConversationEntry)), `${PLUGIN_ID}: conversation entry`)
 }
