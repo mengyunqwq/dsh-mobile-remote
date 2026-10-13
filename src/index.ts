@@ -17,6 +17,7 @@ import type { HostConnectionHandle, ConnectionTrustRequest } from '@deepseek-ai/
 import type SessionControllerModule from '@deepseek-ai/dsh-api-session-controller'
 import type WorkspaceControllerModule from '@deepseek-ai/dsh-api-workspace-controller'
 import type PermissionPresetServiceModule from '@deepseek-ai/dsh-permission-presets'
+import type { WorkspaceChanges as WorkspaceChangesModule } from '@deepseek-ai/dsh-workspace-changes'
 import type { SessionPromptRequest, SessionAddress, SessionCancelRequest, SessionSelectModelRequest } from '@deepseek-ai/dsh-api-session-controller/types'
 import z from '@deepseek-ai/schemastery'
 import { renderMobilePage } from './page.js'
@@ -43,10 +44,11 @@ type AppContext = Context & {
   sessionController: SessionControllerModule
   workspaceController: WorkspaceControllerModule
   permissionPresets: PermissionPresetServiceModule
+  workspaceChanges: WorkspaceChangesModule
 }
 
 export const name = "@dsh-external/dsh-mobile-remote"
-export const inject = ['webServer', 'connection', 'sessionController', 'workspaceController', 'permissionPresets']
+export const inject = ['webServer', 'connection', 'sessionController', 'workspaceController', 'permissionPresets', 'workspaceChanges']
 
 export function apply(ctx: AppContext, config: TunnelConfig): void {
   applyInner(ctx, config ?? {})
@@ -321,7 +323,7 @@ async function authed(){
         return
       }
       res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' })
-      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair', 'workspaces', 'models', 'selectModel', 'status'] }))
+      res.end(JSON.stringify({ ok: true, endpoints: ['sessions', 'page', 'prompt', 'cancel', 'search', 'pair', 'workspaces', 'models', 'selectModel', 'status', 'permissions', 'selectPermission', 'changes', 'fileDiff'] }))
       return
     }
     if (req.method !== 'POST') { res.writeHead(405).end(); return }
@@ -384,6 +386,11 @@ async function authed(){
             tokenUsage: vals.tokenUsage ?? null,
             contextPressure: vals.contextPressure ?? null,
             contextBreakdown: vals.contextBreakdown ?? null,
+            // 「工作完成得怎么样」：待办 / 目标 / 计划 / 工作量（都取自 DSH 自己的投影）
+            todos: vals.todos ?? null,
+            goal: vals.goal ?? null,
+            plan: vals.plan ?? null,
+            sessionStats: vals.sessionStats ?? null,
             queue: {
               nextTurn: texts(inbox['next-turn']),
               nextStep: texts(inbox['next-step']),
@@ -403,6 +410,23 @@ async function authed(){
             current = String(vals.permissions?.currentValue ?? '')
           }
           value = { catalog, current }
+          break
+        }
+        case 'changes': {
+          // 某一 turn 的改动文件汇总（Host 侧保存，随 workspace/changes 事件的 seq 取）
+          const sid = String(body.sid)
+          const seq = Number(body.seq)
+          const summary = ctx.workspaceChanges.summary(sid as never, seq)
+          value = summary ?? null
+          break
+        }
+        case 'fileDiff': {
+          // 单个文件的 turn 前后对比（统一 diff 片段）——手机上就能核对"到底改了什么"
+          const sid = String(body.sid)
+          const seq = Number(body.seq)
+          const index = Number(body.index)
+          const d = await ctx.workspaceChanges.diff(sid as never, seq, index, new AbortController().signal)
+          value = d ?? null
           break
         }
         case 'selectPermission': {

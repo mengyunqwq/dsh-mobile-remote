@@ -199,7 +199,7 @@ if (pageHtml) {
     ['任务状态来自 status 接口', "api('status'"],
     ['状态轮询', 'setInterval(tick, 3000)'],
     ['思考默认折叠（构造时不展开）', "function thinkBlock(text) {"],
-    ['turn 过程折叠为「已完成」并带时间', "'已完成 · ' + hhmmss"],
+    ['turn 过程折叠为「已完成」并带时间', "var parts = ['已完成']"],
     ['turn 结束收起过程块', 't.box.open = false'],
     ['上下文圆环（百分比）', "btn.appendChild(el('span', null, occ.percent + '%'))"],
     ['上下文算法与 DSH 一致', 'projectedTokens != null'],
@@ -215,6 +215,17 @@ if (pageHtml) {
     ['高危权限确认门（完全权限）', '确认启用完全权限'],
     ['高危权限确认门（Auto review）', '确认启用 Auto review'],
     ['权限 chip 用短中文名', "'工作区可写'"],
+    ['turn 摘要含步数/工具数/耗时', "' 步'"],
+    ['turn 摘要含改动文件数', "'📄 '"],
+    ['turn 摘要含出错标记', "'⚠️ '"],
+    ['改动文件清单（带增删行数）', "el('div', 'chgRow')"],
+    ['改动文件接口', "api('changes'"],
+    ['单文件 diff 接口', "api('fileDiff'"],
+    ['diff 渲染（增/删/块头着色）', "'dline hunk'"],
+    ['待办进度 chip', 'id="progBtn"'],
+    ['进度面板：待办列表', "'待办 '"],
+    ['进度面板：工作量统计', "'工作量'"],
+    ['进度面板：目标', "'目标'"],
   ]
   for (const [label, needle] of mustHave) {
     check(`手机页能力：${label}`, () => {

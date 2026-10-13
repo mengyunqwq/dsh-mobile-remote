@@ -72,6 +72,27 @@ details.tool>summary::before{content:"🔧";font-size:11px}
 details.tool pre{margin:7px 0 2px;white-space:pre-wrap;word-break:break-word;font:11.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#525c6b;max-height:260px;overflow:auto}
 details.tool .res{margin-top:7px;border-top:1px dashed var(--line);padding-top:7px}
 .sysline{color:#a3aab6;font-size:12px;text-align:center;margin:9px 0}
+/* 核查面板：改动文件 / diff / 待办 */
+.pchip{display:none;align-items:center;gap:4px;background:#eef3ff;border:none;color:#1d4ed8;border-radius:999px;padding:4px 9px;font-size:11.5px;cursor:pointer;flex:none}
+.changes{margin:6px 0 2px;border-top:1px dashed var(--line);padding-top:6px}
+.changes .hd{font-size:12px;color:#4b5563;margin-bottom:4px}
+.chgRow{display:flex;gap:6px;align-items:baseline;padding:4px 6px;border-radius:8px;cursor:pointer;font:11.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+.chgRow:active{background:var(--soft)}
+.chgRow .p{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#374151}
+.chgRow .a{color:#067647}
+.chgRow .d{color:#b42318}
+.dwrap{font:11.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre;overflow-x:auto;background:#fbfcfd;border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:8px 0}
+.dline{display:block;white-space:pre}
+.dline.add{background:#e7f6ec;color:#116329}
+.dline.del{background:#fdecea;color:#a40e26}
+.dline.hunk{color:#7a8699}
+.todoRow{display:flex;gap:8px;align-items:flex-start;padding:6px 8px;font-size:13px}
+.todoRow .ic{flex:none;width:16px;text-align:center}
+.todoRow.completed{color:#98a2b3;text-decoration:line-through}
+.todoRow.in_progress{color:#1d4ed8;font-weight:600}
+.statRow{display:flex;gap:8px;padding:5px 8px;font-size:12.5px}
+.statRow .k{flex:1;color:#4b5563}
+.statRow .v{font-variant-numeric:tabular-nums;color:#374151}
 /* 输入区 */
 #dock{padding:8px 12px calc(10px + env(safe-area-inset-bottom));background:linear-gradient(180deg,rgba(247,248,250,0),var(--bg) 38%)}
 #queue{display:none;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 11px;margin-bottom:8px;font-size:12.5px;box-shadow:var(--shadow)}
@@ -140,6 +161,7 @@ details.others[open]>summary::before{content:"▾ "}
 <header>
   <button class="ghost" id="menu" aria-label="会话">☰</button>
   <div class="title"><span id="curTitle">DSH 手机遥控</span><span class="sub" id="curSub">连接中…</span></div>
+  <button class="pchip" id="progBtn" type="button" title="进度/工作量/改动">进度</button>
   <button class="ghost" id="jumpDown" aria-label="回到底部">↓</button>
 </header>
 
@@ -189,6 +211,16 @@ details.others[open]>summary::before{content:"▾ "}
   <div id="permList">加载中…</div>
 </div></div>
 
+<div class="sheet" id="sheetProg"><div class="panel">
+  <h3>进度 / 工作量 / 改动</h3>
+  <div id="progBody">加载中…</div>
+</div></div>
+
+<div class="sheet" id="sheetDiff"><div class="panel">
+  <h3 id="diffTitle">文件改动</h3>
+  <div id="diffBody">加载中…</div>
+</div></div>
+
 <script>
 'use strict'
 var $ = function (id) { return document.getElementById(id) }
@@ -208,6 +240,10 @@ var modelOverride = null
 var permCatalog = null
 var curPerm = ''
 var usage = { tokenUsage: null, contextPressure: null, contextBreakdown: null }
+var todos = null
+var goal = null
+var plan = null
+var stats = null
 var running = false
 var queueItems = []
 var counter = 0
@@ -297,18 +333,158 @@ function turnBox(turnNo) {
   var body = el('div', 'body')
   box.appendChild(sum); box.appendChild(body)
   logEl.appendChild(box)
-  t = { box: box, body: body, sum: sum, done: false }
+  t = { box: box, body: body, sum: sum, done: false, steps: 0, tools: 0, errors: 0, start: 0, end: 0, chg: '' }
   turns.set(key, t)
   return t
 }
 function appendToTurn(turnNo, node) { turnBox(turnNo).body.appendChild(node) }
+/** 完成摘要：把"做了什么"摆到折叠标题上（步数/工具次数/耗时/改动/错误）。 */
+function turnSummary(t) {
+  var parts = ['已完成']
+  if (t.end) parts.push(hhmmss(t.end))
+  var bits = []
+  if (t.steps) bits.push(t.steps + ' 步')
+  if (t.tools) bits.push(t.tools + ' 次工具')
+  if (t.start && t.end && t.end >= t.start) bits.push(((t.end - t.start) / 1000).toFixed(1) + 's')
+  if (bits.length) parts.push(bits.join(' · '))
+  if (t.chg) parts.push(t.chg)
+  if (t.errors) parts.push('⚠️ ' + t.errors + ' 处出错')
+  return parts.join(' · ')
+}
+function refreshTurnSummary(t) { if (t.done) t.sum.textContent = turnSummary(t) }
 function finishTurn(turnNo, timeMs) {
   var t = turns.get(keyOfTurn(turnNo))
   if (!t || t.done) return
   t.done = true
-  t.sum.textContent = '已完成 · ' + hhmmss(timeMs)
+  t.end = timeMs || Date.now()
+  t.sum.textContent = turnSummary(t)
   t.box.open = false
   scrollDown()
+}
+
+// ── 「实际做了什么」：改动文件 + 单文件 diff（D SH 的 workspaceChanges 数据）──
+var lastChanges = null   // { seq, summary }
+async function loadChanges(turnKey, seq) {
+  if (!cur || seq == null) return
+  try {
+    var res = await api('changes', { sid: cur.sessionId, seq: seq })
+    var s = res.value
+    if (!s || !s.total) return
+    lastChanges = { seq: seq, summary: s }
+    var t = turns.get(turnKey)
+    var box = el('div', 'changes')
+    var hd = el('div', 'hd', '改动 ' + s.total + ' 个文件 · +' + s.added + ' −' + s.deleted)
+    box.appendChild(hd)
+    ;(s.files || []).forEach(function (f, i) {
+      var row = el('div', 'chgRow')
+      row.appendChild(el('span', 'p', f.display || f.path))
+      row.appendChild(el('span', 'a', '+' + (f.added || 0)))
+      row.appendChild(el('span', 'd', '−' + (f.deleted || 0)))
+      row.onclick = function () { openDiff(seq, i, f.display || f.path) }
+      box.appendChild(row)
+    })
+    var note = el('div', 'hd', '点文件看改动前后对比')
+    box.appendChild(note)
+    if (t) {
+      t.body.appendChild(box)
+      t.chg = '📄 ' + s.total + ' 文件 +' + s.added + '−' + s.deleted
+      refreshTurnSummary(t)
+    } else {
+      var rowWrap = el('div', 'row')
+      rowWrap.appendChild(box)
+      logEl.appendChild(rowWrap)
+    }
+    scrollDown()
+  } catch (e) { /* 改动汇总取不到就算了，不打扰阅读 */ }
+}
+
+async function openDiff(seq, index, display) {
+  openSheet('sheetDiff')
+  $('diffTitle').textContent = display || '文件改动'
+  var body = $('diffBody')
+  body.textContent = '加载中…'
+  try {
+    var res = await api('fileDiff', { sid: cur.sessionId, seq: seq, index: index })
+    var d = res.value
+    body.innerHTML = ''
+    if (!d) { body.appendChild(el('div', 'sysline', '该改动已不可用（会话已释放或未记录）')); return }
+    if (d.kind === 'binary') { body.appendChild(el('div', 'sysline', '二进制文件，无文本对比')); return }
+    if (d.kind === 'oversized') { body.appendChild(el('div', 'sysline', '文件过大，未做对比')); return }
+    var meta = el('div', 'statRow')
+    meta.appendChild(el('span', 'k', (d.before ? '改前有' : '改前无') + ' → ' + (d.after ? '改后有' : '改后无') + (d.coarse ? '（粗略对比）' : '')))
+    body.appendChild(meta)
+    var wrap = el('div', 'dwrap')
+    ;(d.hunks || []).forEach(function (h) {
+      wrap.appendChild(el('span', 'dline hunk', '@@ -' + h.oldStart + ',' + h.oldLines + ' +' + h.newStart + ',' + h.newLines + ' @@'))
+      ;(h.lines || []).forEach(function (ln) {
+        var cls = 'dline'
+        if (ln.charAt(0) === '+') cls += ' add'
+        else if (ln.charAt(0) === '-') cls += ' del'
+        wrap.appendChild(el('span', cls, ln))
+      })
+    })
+    if (!(d.hunks || []).length) wrap.appendChild(el('span', 'dline', '（内容无变化）'))
+    body.appendChild(wrap)
+  } catch (e) { body.textContent = '读取失败：' + e }
+}
+
+// ── 进度 / 工作量（DSH 的 todos / goal / plan / sessionStats 投影）──
+function paintProgress() {
+  var btn = $('progBtn')
+  var list = todos || []
+  var done = list.filter(function (t) { return t.status === 'completed' }).length
+  var has = list.length > 0 || goal
+  if (!has) { btn.style.display = 'none'; return }
+  btn.style.display = 'flex'
+  btn.textContent = list.length ? ('待办 ' + done + '/' + list.length) : '进度'
+  btn.title = '进度 / 工作量 / 改动'
+}
+function paintProgSheet() {
+  var box = $('progBody')
+  box.innerHTML = ''
+  var list = todos || []
+  if (goal) {
+    box.appendChild(el('div', 'mprov', '目标'))
+    box.appendChild(el('div', 'statRow')).appendChild(el('span', 'k', String(goal.objective || '')))
+    box.appendChild(el('div', 'statRow')).appendChild(el('span', 'k', '阶段：' + String(goal.phase || '—') + (goal.roundsStarted != null ? ' · 轮次 ' + goal.roundsStarted : '')))
+  }
+  if (list.length) {
+    var done = list.filter(function (t) { return t.status === 'completed' }).length
+    box.appendChild(el('div', 'mprov', '待办 ' + done + '/' + list.length))
+    list.forEach(function (t) {
+      var row = el('div', 'todoRow ' + (t.status || 'pending'))
+      var ic = t.status === 'completed' ? '✓' : (t.status === 'in_progress' ? '▶' : '○')
+      row.appendChild(el('span', 'ic', ic))
+      row.appendChild(el('span', 'k', t.content || ''))
+      box.appendChild(row)
+    })
+  }
+  var st = stats || {}
+  if (st.turns != null || st.steps != null) {
+    box.appendChild(el('div', 'mprov', '工作量'))
+    ;[['turns', '轮次'], ['steps', '步数'], ['llmMs', '模型耗时'], ['toolMs', '工具耗时'], ['ttftMs', '首字延迟'], ['decodeTokens', '输出 token']].forEach(function (p) {
+      var v = st[p[0]]
+      if (v == null) return
+      var val = (p[0].indexOf('Ms') > 0) ? (Math.round(Number(v) / 100) / 10) + 's' : String(v)
+      var r = el('div', 'statRow')
+      r.appendChild(el('span', 'k', p[1]))
+      r.appendChild(el('span', 'v', val))
+      box.appendChild(r)
+    })
+  }
+  if (lastChanges && lastChanges.summary) {
+    var s = lastChanges.summary
+    box.appendChild(el('div', 'mprov', '最近一次改动（' + s.total + ' 文件 +' + s.added + ' −' + s.deleted + '）'))
+    ;(s.files || []).forEach(function (f, i) {
+      var row = el('div', 'chgRow')
+      row.appendChild(el('span', 'p', f.display || f.path))
+      row.appendChild(el('span', 'a', '+' + (f.added || 0)))
+      row.appendChild(el('span', 'd', '−' + (f.deleted || 0)))
+      row.onclick = function () { openDiff(lastChanges.seq, i, f.display || f.path) }
+      box.appendChild(row)
+    })
+  }
+  if (!box.childNodes.length) box.appendChild(el('div', 'sysline', '该会话还没有待办/改动记录（agent 用 todo_write 或改了文件后会出现）'))
 }
 
 function renderEvent(ev, key) {
@@ -321,10 +497,13 @@ function renderEvent(ev, key) {
   }
   if (t === 'turn/start') {
     if (d.turn == null) { turnCounter += 1; activeTurn = String(turnCounter) } else { activeTurn = String(d.turn) }
-    turnBox(d.turn)
+    var tb0 = turnBox(d.turn)
+    tb0.start = ev.time || Date.now()
     return
   }
-  if (t === 'turn/end') { finishTurn(d.turn, d.time || ev.time); return }
+  if (t === 'turn/end') { finishTurn(d.turn, ev.time); return }
+  if (t === 'step/start') { turnBox(d.turn).steps += 1; return }
+  if (t === 'workspace/changes') { loadChanges(keyOfTurn(d.turn), ev.seq); return }
   if (t === 'assistant/message') {
     var content = ((d.message || {}).content) || []
     var textBubble = null
@@ -346,11 +525,17 @@ function renderEvent(ev, key) {
     }
     return
   }
-  if (t === 'tool/call') { appendToTurn(d.turn, toolCard(d.name, d.arguments, d.callId)); return }
+  if (t === 'tool/call') {
+    var tc = turnBox(d.turn); tc.tools += 1
+    appendToTurn(d.turn, toolCard(d.name, d.arguments, d.callId))
+    return
+  }
   if (t === 'tool/result') {
     var card = cards.get(d.toolCallId)
     var out = textOfContent((d.message || {}).content)
     var isErr = !!(d.message && d.message.isError)
+    var tr = turnBox(d.turn)
+    if (isErr) { tr.errors += 1; refreshTurnSummary(tr) }
     var res = el('div', 'res')
     if (isErr) res.appendChild(el('div', null, '⚠️ 出错'))
     res.appendChild(el('pre', null, out || '（无输出）'))
@@ -524,9 +709,13 @@ function startStatusPolling(sid) {
       if (v.tokenUsage) usage.tokenUsage = v.tokenUsage
       if (v.contextPressure) usage.contextPressure = v.contextPressure
       if (v.contextBreakdown) usage.contextBreakdown = v.contextBreakdown
+      todos = v.todos || null
+      goal = v.goal || null
+      plan = v.plan || null
+      stats = v.sessionStats || stats
       queueItems = (v.queue && (v.queue.nextTurn || []).concat(v.queue.nextStep || [])) || []
       setRunning(!!v.running)
-      paintModelBtn(); paintPermBtn(); paintCtx()
+      paintModelBtn(); paintPermBtn(); paintCtx(); paintProgress()
     } catch (e) { /* 忽略单次失败 */ }
   }
   tick()
@@ -837,14 +1026,15 @@ function paintSidebar(box) {
 
 // ── 交互 ────────────────────────────────────────────────────
 function closeSheets() {
-  ;['drawer', 'sheetModel', 'sheetCtx', 'sheetPerm'].forEach(function (id) { $(id).classList.remove('open') })
+  ;['drawer', 'sheetModel', 'sheetCtx', 'sheetPerm', 'sheetProg', 'sheetDiff'].forEach(function (id) { $(id).classList.remove('open') })
 }
 function openSheet(id) { closeSheets(); $(id).classList.add('open') }
 $('menu').onclick = function () { openSheet('drawer'); loadSidebar() }
 $('modelBtn').onclick = function () { openSheet('sheetModel'); loadModels() }
 $('permBtn').onclick = function () { openSheet('sheetPerm'); loadPermissions() }
 $('ctxBtn').onclick = function () { openSheet('sheetCtx'); paintCtxSheet() }
-;$(['drawer', 'sheetModel', 'sheetCtx', 'sheetPerm']).forEach(function (id) {
+$('progBtn').onclick = function () { openSheet('sheetProg'); paintProgSheet() }
+;$(['drawer', 'sheetModel', 'sheetCtx', 'sheetPerm', 'sheetProg', 'sheetDiff']).forEach(function (id) {
   $(id).onclick = function (e) { if (e.target.id === id) closeSheets() }
 })
 $('jumpDown').onclick = scrollDown
@@ -852,6 +1042,8 @@ $('jumpDown').onclick = scrollDown
 function openSession(s) {
   cur = { sessionId: s.sessionId, title: s.title }
   modelOverride = null
+  lastChanges = null
+  todos = null; goal = null; plan = null; stats = null
   follow(s.sessionId)
 }
 
